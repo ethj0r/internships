@@ -1,0 +1,170 @@
+/*
+  Design tokens, following Apple's Human Interface Guidelines:
+  system typography, semantic colors, materials used only for navigation chrome,
+  a 4pt spacing grid, and restrained motion.
+*/
+
+:root {
+  color-scheme: light dark;
+
+  /* Typography */
+  --font-text: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --type-large-title: 600 30px/1.14 var(--font-display);
+  --type-title-1: 600 24px/1.2 var(--font-display);
+  --type-title-2: 600 20px/1.25 var(--font-display);
+  --type-headline: 600 15px/1.35 var(--font-text);
+  --type-body: 400 15px/1.47 var(--font-text);
+  --type-callout: 400 14px/1.43 var(--font-text);
+  --type-subhead: 400 13px/1.38 var(--font-text);
+  --type-caption: 400 12px/1.33 var(--font-text);
+
+  --tracking-large: -0.022em;
+  --tracking-title: -0.017em;
+  --tracking-body: -0.01em;
+
+  /* Spacing (4pt grid) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 44px;
+  --space-9: 64px;
+
+  /* Radius: controls < grouped content < floating surfaces */
+  --radius-xs: 5px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+
+  /* Color: light */
+  --color-bg: #f5f5f7;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-fill: rgba(120, 120, 128, 0.12);
+  --color-fill-hover: rgba(120, 120, 128, 0.18);
+  --color-fill-subtle: rgba(120, 120, 128, 0.07);
+  --color-selection: rgba(0, 113, 227, 0.1);
+  --color-segment-selected: #ffffff;
+
+  --color-label: #1d1d1f;
+  --color-label-secondary: #6e6e73;
+  --color-label-tertiary: #8e8e93;
+  --color-separator: rgba(60, 60, 67, 0.13);
+  --color-separator-strong: rgba(60, 60, 67, 0.22);
+
+  --color-accent: #0071e3;
+  --color-accent-hover: #0077ed;
+  --color-accent-pressed: #0066cc;
+  --color-on-accent: #ffffff;
+  --color-focus: rgba(0, 113, 227, 0.45);
+
+  --color-green: #248a3d;
+  --color-green-fill: rgba(52, 199, 89, 0.14);
+  --color-orange: #c93400;
+  --color-orange-fill: rgba(255, 149, 0, 0.14);
+  --color-yellow: #a05a00;
+  --color-yellow-fill: rgba(255, 204, 0, 0.18);
+  --color-red: #d70015;
+  --color-red-fill: rgba(255, 59, 48, 0.1);
+  --color-indigo: #3634a3;
+  --color-indigo-fill: rgba(88, 86, 214, 0.12);
+  --color-teal: #007d8f;
+  --color-teal-fill: rgba(48, 176, 199, 0.14);
+  --color-gray: #6e6e73;
+  --color-gray-fill: rgba(142, 142, 147, 0.14);
+
+  --color-diff-add: rgba(52, 199, 89, 0.16);
+  --color-diff-remove: rgba(255, 59, 48, 0.12);
+
+  /* Materials (navigation chrome only) */
+  --material-sidebar: rgba(236, 236, 240, 0.78);
+  --material-bar: rgba(250, 250, 252, 0.78);
+  --material-blur: saturate(180%) blur(20px);
+
+  /* Depth */
+  --shadow-hairline: 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+  --shadow-card: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-popover: 0 0 0 0.5px rgba(0, 0, 0, 0.1), 0 8px 28px rgba(0, 0, 0, 0.12);
+  --shadow-sheet: 0 0 0 0.5px rgba(0, 0, 0, 0.1), 0 24px 70px rgba(0, 0, 0, 0.22);
+  --color-scrim: rgba(0, 0, 0, 0.28);
+
+  /* Motion */
+  --ease-standard: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-emphasized: cubic-bezier(0.2, 0.9, 0.25, 1.05);
+  --duration-fast: 120ms;
+  --duration-base: 220ms;
+  --duration-slow: 360ms;
+
+  /* Layout */
+  --sidebar-width: 232px;
+  --list-width: 380px;
+  --bar-height: 52px;
+  --tabbar-height: 56px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #161617;
+    --color-surface: #1d1d1f;
+    --color-surface-raised: #2c2c2e;
+    --color-fill: rgba(118, 118, 128, 0.24);
+    --color-fill-hover: rgba(118, 118, 128, 0.32);
+    --color-fill-subtle: rgba(118, 118, 128, 0.14);
+    --color-selection: rgba(41, 151, 255, 0.18);
+    --color-segment-selected: #636366;
+
+    --color-label: #f5f5f7;
+    --color-label-secondary: #a1a1a6;
+    --color-label-tertiary: #8e8e93;
+    --color-separator: rgba(84, 84, 88, 0.55);
+    --color-separator-strong: rgba(120, 120, 128, 0.6);
+
+    --color-accent: #2997ff;
+    --color-accent-hover: #47a6ff;
+    --color-accent-pressed: #1a8cff;
+    --color-on-accent: #ffffff;
+    --color-focus: rgba(41, 151, 255, 0.55);
+
+    --color-green: #30d158;
+    --color-green-fill: rgba(48, 209, 88, 0.18);
+    --color-orange: #ff9f0a;
+    --color-orange-fill: rgba(255, 159, 10, 0.18);
+    --color-yellow: #ffd60a;
+    --color-yellow-fill: rgba(255, 214, 10, 0.16);
+    --color-red: #ff453a;
+    --color-red-fill: rgba(255, 69, 58, 0.18);
+    --color-indigo: #7d7aff;
+    --color-indigo-fill: rgba(94, 92, 230, 0.24);
+    --color-teal: #40c8e0;
+    --color-teal-fill: rgba(64, 200, 224, 0.18);
+    --color-gray: #98989d;
+    --color-gray-fill: rgba(142, 142, 147, 0.22);
+
+    --color-diff-add: rgba(48, 209, 88, 0.2);
+    --color-diff-remove: rgba(255, 69, 58, 0.2);
+
+    --material-sidebar: rgba(30, 30, 32, 0.78);
+    --material-bar: rgba(29, 29, 31, 0.78);
+
+    --shadow-hairline: 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+    --shadow-card: 0 0 0 0.5px rgba(255, 255, 255, 0.08);
+    --shadow-popover: 0 0 0 0.5px rgba(255, 255, 255, 0.12), 0 10px 32px rgba(0, 0, 0, 0.5);
+    --shadow-sheet: 0 0 0 0.5px rgba(255, 255, 255, 0.12), 0 24px 70px rgba(0, 0, 0, 0.6);
+    --color-scrim: rgba(0, 0, 0, 0.5);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+  }
+}
