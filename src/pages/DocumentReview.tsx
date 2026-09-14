@@ -1,0 +1,255 @@
+import { diffWords } from "diff";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router";
+import type { Document } from "../../shared/types";
+import { ErrorState, Loading, Markdown, Segmented, Warnings } from "../components/common";
+import { Icon, Spinner } from "../components/Icon";
+import { MenuButton } from "../components/Menu";
+import { Sheet } from "../components/Sheet";
+import { useToast } from "../components/Toast";
+import { api } from "../lib/api";
+import { KIND_LABELS, markdownToPlainText, relativeTime } from "../lib/format";
+import { invalidate, useAction, useDocumentTitle, useResource } from "../lib/hooks";
+
+type Mode = "changes" | "edit" | "preview";
+
+export function DocumentReview() {
+  const id = Number(useParams().docId);
+  const { data: doc, error, loading, reload, mutate } = useResource(`doc:${id}`, () => api.document(id));
+  const toast = useToast();
+  const navigate = useNavigate();
+  const [mode, setMode] = useState<Mode | null>(null);
+  const [draft, setDraft] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  useDocumentTitle(doc?.title);
+
+  const hasDiff = doc?.kind === "tailored_cv" && Boolean(doc.meta.parentContent);
+  const currentMode: Mode = mode ?? (hasDiff && doc?.status === "draft" ? "changes" : doc?.kind === "master_cv" && doc.content.length < 40 ? "edit" : "preview");
+  const content = draft ?? doc?.content ?? "";
+  const dirty = draft !== null && draft !== doc?.content;
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  const afterChange = (updated: Document) => {
+    mutate({ ...updated, meta: { ...updated.meta, parentContent: doc?.meta.parentContent } });
+    invalidate("documents", "overview", "kit:", "applications", "events", ...(updated.jobId ? [`job:${updated.jobId}`] : []));
+  };
+
+  const [save, saving] = useAction(async (): Promise<Document | undefined> => {
+    if (!doc || draft === null) return doc;
+    const updated = await api.updateDocument(doc.id, { content: draft });
+    afterChange(updated);
+    setDraft(null);
+    toast.show("Changes saved");
+    if (updated.kind === "master_cv") invalidate("jobs", "job:");
+    return updated;
+  }, toast.error);
+
+  const [setStatus, statusPending] = useAction(async (status: "draft" | "approved") => {
+    if (!doc) return;
+    if (dirty) await save();
+    const updated = await api.updateDocument(doc.id, { status });
+    afterChange(updated);
+    toast.show(status === "approved" ? `${KIND_LABELS[doc.kind]} approved` : "Moved back to draft");
+  }, toast.error);
+
+  const [remove] = useAction(async () => {
+    if (!doc) return;
+    await api.deleteDocument(doc.id);
+    invalidate("documents", "overview", "kit:", ...(doc.jobId ? [`job:${doc.jobId}`] : []));
+    toast.show(`${KIND_LABELS[doc.kind]} deleted`);
+    navigate(doc.jobId ? `/jobs/${doc.jobId}` : "/documents", { replace: true });
+  }, toast.error);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        if (dirty) void save();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dirty, save]);
+
+  if (!doc) return <div className="page">{loading ? <Loading /> : error && <ErrorState error={error} onRetry={() => void reload()} />}</div>;
+
+  const isMaster = doc.kind === "master_cv";
+  const modes: { value: Mode; label: string }[] = [
+    ...(hasDiff ? [{ value: "changes" as const, label: "Changes" }] : []),
+    { value: "preview", label: "Preview" },
+    { value: "edit", label: "Edit" },
+  ];
+  const warnings = doc.meta.warnings ?? [];
+  const canRevert = doc.generatedContent && content !== doc.generatedContent;
+
+  return (
+    <div className="page">
+      <div className="bar">
+        <Link to={doc.jobId ? `/jobs/${doc.jobId}` : "/documents"} className="btn btn-plain">
+          <Icon name="chevron-left" />
+          <span className="hide-mobile">{doc.job ? doc.job.company : "Documents"}</span>
+        </Link>
+        <span className="spacer" />
+        <Segmented label="View" value={currentMode} options={modes} onChange={setMode} />
+        <span className="spacer" />
+        <MenuButton
+          className="btn btn-plain btn-icon"
+          label="More"
+          align="end"
+          items={[
+            { key: "print", label: "Print or Save as PDF", onSelect: () => window.open(`/print/${doc.id}`, "_blank", "noopener") },
+            { key: "copy", label: "Copy as Plain Text", onSelect: () => void navigator.clipboard.writeText(markdownToPlainText(content)).then(() => toast.show("Copied")) },
+            ...(canRevert ? [{ key: "revert", label: "Revert to Generated Version", onSelect: () => { setDraft(doc.generatedContent); setMode("edit"); } }] : []),
+            ...(doc.status === "approved" ? [{ key: "unapprove", label: "Move Back to Draft", onSelect: () => void setStatus("draft") }] : []),
+            { key: "delete", label: "Delete…", destructive: true, separatorBefore: true, onSelect: () => setConfirmDelete(true) },
+          ]}
+        >
+          <Icon name="ellipsis" />
+        </MenuButton>
+        {dirty && (
+          <button type="button" className="btn" onClick={() => void save()} disabled={saving}>
+            {saving && <Spinner />}
+            Save
+          </button>
+        )}
+        {!isMaster &&
+          (doc.status === "approved" ? (
+            <span className="btn btn-plain" style={{ color: "var(--color-green)", cursor: "default" }} aria-live="polite">
+              <Icon name="check" />
+              Approved
+            </span>
+          ) : (
+            <button type="button" className="btn btn-primary" onClick={() => void setStatus("approved")} disabled={statusPending}>
+              {statusPending && <Spinner />}
+              Approve
+            </button>
+          ))}
+      </div>
+
+      <div className="page-inner">
+        <header style={{ marginBottom: 24 }}>
+          <p className="detail-company">{doc.job ? `${doc.job.company}, ${doc.job.title}` : KIND_LABELS[doc.kind]}</p>
+          <h1 className="title-1" style={{ marginTop: 2 }}>
+            {doc.title}
+          </h1>
+          <p className="subhead muted" style={{ marginTop: 6 }}>
+            {isMaster
+              ? doc.meta.filename
+                ? `Extracted from ${doc.meta.filename}. Check the text converted cleanly.`
+                : `Updated ${relativeTime(doc.updatedAt).toLowerCase()}`
+              : `${doc.status === "approved" ? "Approved" : "Draft"}${doc.meta.generator ? `, written by ${doc.meta.generator}` : ""}, ${relativeTime(doc.createdAt).toLowerCase()}`}
+          </p>
+        </header>
+
+        {warnings.length > 0 && (
+          <div style={{ marginBottom: 24 }}>
+            <Warnings
+              title={warnings.length === 1 ? "Check this before using it" : `Check these ${warnings.length} things before using it`}
+              warnings={warnings}
+            />
+          </div>
+        )}
+
+        {currentMode === "changes" && hasDiff && <ChangesView doc={doc} content={content} />}
+        {currentMode === "preview" && (
+          <div className="paper">
+            <Markdown source={content} />
+          </div>
+        )}
+        {currentMode === "edit" && (
+          <div className="field">
+            <label className="sr-only" htmlFor="doc-editor">
+              Document text
+            </label>
+            <textarea id="doc-editor" className="textarea editor" value={content} onChange={(e) => setDraft(e.target.value)} spellCheck />
+            <p className="field-hint">Markdown: # Name, ## Section, - bullet, **bold**. Press ⌘S to save.</p>
+          </div>
+        )}
+
+        {doc.meta.grounding && doc.meta.grounding.length > 0 && currentMode !== "edit" && (
+          <section className="section">
+            <div className="section-header">
+              <h2 className="section-title">{doc.kind === "answers" ? "Sources for each answer" : "Where each claim comes from"}</h2>
+            </div>
+            <div className="group">
+              {doc.meta.grounding.map((g, i) => (
+                <div key={i} className="row">
+                  <div className="row-main">
+                    <p className="row-title">{g.claim}</p>
+                    <p className="row-subtitle">{g.source}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
+
+      <Sheet
+        open={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        title={`Delete this ${KIND_LABELS[doc.kind].toLowerCase()}?`}
+        message="This can't be undone."
+        actions={
+          <>
+            <button type="button" className="btn" onClick={() => setConfirmDelete(false)}>
+              Cancel
+            </button>
+            <button type="button" className="btn btn-primary" style={{ background: "var(--color-red)" }} onClick={() => void remove()}>
+              Delete
+            </button>
+          </>
+        }
+      />
+    </div>
+  );
+}
+
+function ChangesView({ doc, content }: { doc: Document; content: string }) {
+  const parts = useMemo(() => diffWords(doc.meta.parentContent ?? "", content), [doc.meta.parentContent, content]);
+  const changes = doc.meta.changes ?? [];
+  return (
+    <>
+      {changes.length > 0 && (
+        <section style={{ marginBottom: 32 }}>
+          <div className="section-header">
+            <h2 className="section-title">What changed</h2>
+          </div>
+          <div className="group">
+            {changes.map((c, i) => (
+              <div key={i} className="row" style={{ alignItems: "flex-start" }}>
+                <div className="row-main">
+                  <p className="headline">{c.section}</p>
+                  <p className="row-title" style={{ marginTop: 2 }}>
+                    {c.change}
+                  </p>
+                  <p className="row-subtitle" style={{ marginTop: 2 }}>
+                    {c.reason}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      <div className="section-header">
+        <h2 className="section-title">Compared with your master CV</h2>
+        <span className="legend" aria-hidden="true">
+          <span className="added">Added</span>
+          <span className="removed">Removed</span>
+        </span>
+      </div>
+      <div className="diff">
+        {parts.map((part, i) =>
+          part.added ? <ins key={i}>{part.value}</ins> : part.removed ? <del key={i}>{part.value}</del> : <span key={i}>{part.value}</span>,
+        )}
+      </div>
+    </>
+  );
+}
