@@ -1,0 +1,48 @@
+-- Default discovery sources: public, official job-board APIs.
+-- Every token below was verified to return a live board. Manage sources in the app under Sources.
+
+INSERT INTO sources (kind, identifier, name) VALUES
+  ('greenhouse', 'stripe', 'Stripe'),
+  ('greenhouse', 'airbnb', 'Airbnb'),
+  ('greenhouse', 'databricks', 'Databricks'),
+  ('greenhouse', 'figma', 'Figma'),
+  ('greenhouse', 'discord', 'Discord'),
+  ('greenhouse', 'robinhood', 'Robinhood'),
+  ('greenhouse', 'coinbase', 'Coinbase'),
+  ('greenhouse', 'cloudflare', 'Cloudflare'),
+  ('greenhouse', 'datadog', 'Datadog'),
+  ('greenhouse', 'pinterest', 'Pinterest'),
+  ('greenhouse', 'lyft', 'Lyft'),
+  ('greenhouse', 'reddit', 'Reddit'),
+  ('greenhouse', 'dropbox', 'Dropbox'),
+  ('greenhouse', 'asana', 'Asana'),
+  ('greenhouse', 'duolingo', 'Duolingo'),
+  ('greenhouse', 'roblox', 'Roblox'),
+  ('greenhouse', 'instacart', 'Instacart'),
+  ('greenhouse', 'brex', 'Brex'),
+  ('greenhouse', 'samsara', 'Samsara'),
+  ('greenhouse', 'scaleai', 'Scale AI'),
+  ('greenhouse', 'anthropic', 'Anthropic'),
+  ('greenhouse', 'gitlab', 'GitLab'),
+  ('greenhouse', 'mongodb', 'MongoDB'),
+  ('greenhouse', 'elastic', 'Elastic'),
+  ('greenhouse', 'affirm', 'Affirm'),
+  ('greenhouse', 'okta', 'Okta'),
+  ('greenhouse', 'waymo', 'Waymo'),
+  ('greenhouse', 'point72', 'Point72'),
+  ('greenhouse', 'vercel', 'Vercel'),
+  ('lever', 'palantir', 'Palantir'),
+  ('lever', 'spotify', 'Spotify'),
+  ('ashby', 'notion', 'Notion'),
+  ('ashby', 'ramp', 'Ramp'),
+  ('ashby', 'perplexity', 'Perplexity'),
+  ('ashby', 'linear', 'Linear'),
+  ('ashby', 'supabase', 'Supabase'),
+  ('ashby', 'replit', 'Replit'),
+  ('themuse', 'Software Engineering', 'The Muse: Software Engineering'),
+  ('themuse', 'Data Science', 'The Muse: Data Science'),
+  ('themuse', 'Data and Analytics', 'The Muse: Data and Analytics'),
+  ('themuse', 'Computer and IT', 'The Muse: Computer and IT');
+
+-- Holds jobs added by URL or by hand.
+INSERT INTO sources (kind, identifier, name, enabled) VALUES ('manual', 'manual', 'Added manually', 0);
