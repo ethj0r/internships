@@ -10,7 +10,7 @@ import { api } from "../lib/api";
 import { KIND_LABELS, relativeTime } from "../lib/format";
 import { invalidate, useAction, useDocumentTitle, useResource } from "../lib/hooks";
 
-const ACCEPT = ".pdf,.docx,.odt,.md,.markdown,.txt,.html";
+const ACCEPT = ".tex,.pdf,.docx,.odt,.md,.markdown,.txt,.html";
 const GENERATED: DocumentKind[] = ["tailored_cv", "cover_letter", "answers"];
 
 export function Documents() {
@@ -128,7 +128,7 @@ export function Documents() {
               <EmptyState
                 icon="upload"
                 title="Add your master CV"
-                message="Upload a PDF, DOCX or Markdown file, or drop it here. Matching, tailored CVs and cover letters all build on it."
+                message="Upload your résumé's LaTeX source (.tex) so tailored CVs keep your template, or a PDF, DOCX or Markdown file. You can also drop it here."
                 action={
                   <div className="hstack" style={{ justifyContent: "center", marginTop: 12 }}>
                     <button type="button" className="btn btn-primary" onClick={() => fileRef.current?.click()}>
@@ -142,7 +142,10 @@ export function Documents() {
               />
             </div>
           )}
-          <p className="section-footer">Your CV is stored in your private database and only sent to the AI model when you generate or analyze something.</p>
+          <p className="section-footer">
+            Tailored CVs are rendered with your LaTeX résumé template, so a .tex master gives exact results. Your CV is stored in your private database and only sent
+            to the AI model when you generate or analyze something.
+          </p>
         </section>
 
         {GENERATED.map((kind) => {
@@ -212,7 +215,7 @@ function PasteCvSheet({ open, onClose, onSaved }: { open: boolean; onClose: () =
       onClose={onClose}
       wide
       title="Paste your CV"
-      message="Plain text works. Markdown headings (## Experience) and bullets (- Built…) give the best results."
+      message="Paste your résumé's LaTeX source to keep its template exactly. Plain text and Markdown also work."
       actions={
         <>
           <button type="button" className="btn" onClick={onClose}>

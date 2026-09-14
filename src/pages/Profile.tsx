@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
+import { documentText } from "../../shared/cv";
 import { ROLES } from "../../shared/roles";
 import { extractSkills, sameSkill } from "../../shared/skills";
 import type { Profile, RemotePreference } from "../../shared/types";
@@ -27,7 +28,7 @@ function ProfileForm({ profile, onSaved }: { profile: Profile; onSaved: (p: Prof
   const { data: cvSkills } = useResource("profile:cv-skills", async () => {
     const masters = await api.documents({ kind: "master_cv" });
     const active = masters.find((d) => d.isActive) ?? masters[0];
-    return active ? extractSkills((await api.document(active.id)).content) : [];
+    return active ? extractSkills(documentText((await api.document(active.id)).content)) : [];
   });
 
   const initial = useMemo(() => JSON.stringify(toInput(profile)), [profile]);

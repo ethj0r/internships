@@ -1,3 +1,4 @@
+import { documentText, isLatexCv } from "../../shared/cv";
 import type { DocumentKind, SourceKind, Workplace } from "../../shared/types";
 
 const DAY = 86_400_000;
@@ -83,6 +84,11 @@ export const KIND_LABELS: Record<DocumentKind, string> = {
   cover_letter: "Cover Letter",
   answers: "Application Answers",
 };
+
+/** Plain text of any stored document (LaTeX CV or Markdown), for pasting into application forms. */
+export function copyableText(content: string): string {
+  return isLatexCv(content) ? documentText(content, { urls: false }) : markdownToPlainText(content);
+}
 
 /** Plain text for pasting into application forms. */
 export function markdownToPlainText(markdown: string): string {

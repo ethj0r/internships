@@ -2,17 +2,32 @@
 // nothing generated here is used in an application until the user approves it.
 
 import { HTTPException } from "hono/http-exception";
-import type { Document, FitAnalysis, JobDetail, Profile } from "../../shared/types";
+import type { z } from "zod";
+import {
+  applyTailoring,
+  cvToLatex,
+  cvToPlainText,
+  describeTailoring,
+  documentText,
+  headerText,
+  isLatexCv,
+  parseLatexCv,
+  type CvDoc,
+  type CvSection,
+} from "../../shared/cv";
+import type { Document, DocumentChange, FitAnalysis, JobDetail, Profile } from "../../shared/types";
 import {
   AnswersSchema,
   answersPrompt,
   CoverLetterSchema,
   coverLetterPrompt,
+  CvTailoringSchema,
   DEFAULT_QUESTIONS,
   FitAnalysisSchema,
   fitAnalysisPrompt,
+  FullCvSchema,
   renderAnswersMarkdown,
-  TailoredCvSchema,
+  tailorCvFromTextPrompt,
   tailorCvPrompt,
 } from "../ai/prompts";
 import { compactPrompts, generateJson } from "../ai/provider";
@@ -34,7 +49,7 @@ async function loadInputs(env: Env, jobId: number): Promise<Inputs> {
 }
 
 function evidence(profile: Profile, cv: Document): string {
-  return [cv.content, profile.skills.join(", "), profile.education, profile.headline, profile.links.map((l) => l.url).join(" ")].join("\n");
+  return [documentText(cv.content), profile.skills.join(", "), profile.education, profile.headline, profile.links.map((l) => l.url).join(" ")].join("\n");
 }
 
 /** Moves a tracked job into Preparing (or starts tracking it) when documents are generated. */
@@ -77,7 +92,7 @@ async function versionedTitle(env: Env, jobId: number, kind: Document["kind"], b
 
 export async function analyzeFit(env: Env, jobId: number): Promise<FitAnalysis> {
   const { job, profile, cv } = await loadInputs(env, jobId);
-  const { system, prompt } = fitAnalysisPrompt(profile, cv.content, job, job.matchDetail, compactPrompts(env));
+  const { system, prompt } = fitAnalysisPrompt(profile, documentText(cv.content), job, job.matchDetail, compactPrompts(env));
   const { data, generator } = await generateJson(env, { system, prompt, schema: FitAnalysisSchema });
   const analysis: FitAnalysis = {
     summary: data.summary,
@@ -95,28 +110,82 @@ export async function analyzeFit(env: Env, jobId: number): Promise<FitAnalysis> 
   return analysis;
 }
 
+function sectionKey(title: string, index: number): string {
+  return (
+    title
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || `section-${index}`
+  );
+}
+
+function fullCvToDoc(data: z.infer<typeof FullCvSchema>): CvDoc {
+  const sections = data.sections.map((s, index): CvSection => {
+    const key = sectionKey(s.title, index);
+    const base = { key, title: s.title.trim(), note: "" };
+    if (s.kind === "skills") {
+      return { ...base, type: "skills", lines: s.skill_lines.filter((l) => l.items.length).map((l) => ({ label: l.label.trim(), items: l.items })) };
+    }
+    if (s.kind === "entries") {
+      return {
+        ...base,
+        type: "entries",
+        spaced: key !== "education",
+        entries: s.entries.map((e, i) => ({ id: `${key}-${i}`, title: e.title, titleRight: e.title_right, subtitle: e.subtitle, subtitleRight: e.subtitle_right, bullets: e.bullets })),
+      };
+    }
+    const variant: "plain" | "spaced" | "wrap" = /award|certif/i.test(s.title) ? "plain" : /research|paper|publication/i.test(s.title) ? "wrap" : "spaced";
+    return { ...base, type: "items", variant, items: s.items.map((it, i) => ({ id: `${key}-${i}`, heading: it.heading, date: it.date, bullets: it.bullets })) };
+  });
+  return {
+    header: { name: data.name.trim(), contacts: data.contacts.filter((c) => c.text.trim()).map((c) => ({ text: c.text.trim(), url: c.url.trim() || null })) },
+    sections: sections.filter((s) => (s.type === "skills" ? s.lines.length : s.type === "entries" ? s.entries.length : s.type === "items" ? s.items.length : true)),
+  };
+}
+
+/** Tailored CVs are always LaTeX in the résumé template (shared/cvTemplate.ts). */
 export async function generateTailoredCv(env: Env, jobId: number): Promise<number> {
   const { job, profile, cv } = await loadInputs(env, jobId);
-  const { system, prompt } = tailorCvPrompt(profile, cv.content, job, compactPrompts(env));
-  const { data, generator } = await generateJson(env, { system, prompt, schema: TailoredCvSchema });
-  const content = data.cv_markdown.trim();
+  const compact = compactPrompts(env);
+  const master = isLatexCv(cv.content) ? parseLatexCv(cv.content) : null;
+  const warnings: string[] = [];
+  let doc: CvDoc;
+  let changes: DocumentChange[];
+  let generator: string;
+
+  if (master?.sections.length) {
+    const { system, prompt } = tailorCvPrompt(profile, master, job, compact);
+    const result = await generateJson(env, { system, prompt, schema: CvTailoringSchema });
+    doc = applyTailoring(master, result.data, job.skills);
+    generator = result.generator;
+    changes = [...result.data.changes, ...describeTailoring(master, doc)];
+  } else {
+    const { system, prompt } = tailorCvFromTextPrompt(profile, documentText(cv.content), job, compact);
+    const result = await generateJson(env, { system, prompt, schema: FullCvSchema });
+    doc = fullCvToDoc(result.data);
+    generator = result.generator;
+    changes = result.data.changes;
+    warnings.push(
+      "Your master CV isn't a LaTeX file, so the template was filled from its extracted text. Upload your résumé's .tex source under Documents to keep its exact wording and structure.",
+      ...missingContactDetails(cvToPlainText({ header: doc.header, sections: [] }, { urls: true }), headerText(cv.content)),
+    );
+  }
+
+  warnings.push(...verifyGenerated(cvToPlainText(doc, { urls: true }), { evidence: evidence(profile, cv), context: job.description }));
   return insertDocument(env, {
     kind: "tailored_cv",
     title: await versionedTitle(env, jobId, "tailored_cv", `CV for ${job.company}`),
     jobId,
     parentId: cv.id,
-    content,
-    meta: {
-      generator,
-      changes: data.changes,
-      warnings: [...missingContactDetails(content, cv.content), ...verifyGenerated(content, { evidence: evidence(profile, cv), context: job.description })],
-    },
+    content: cvToLatex(doc),
+    meta: { generator, changes, warnings, format: "latex" },
   });
 }
 
 export async function generateCoverLetter(env: Env, jobId: number): Promise<number> {
   const { job, profile, cv } = await loadInputs(env, jobId);
-  const { system, prompt } = coverLetterPrompt(profile, cv.content, job, compactPrompts(env));
+  const { system, prompt } = coverLetterPrompt(profile, documentText(cv.content), job, compactPrompts(env));
   const { data, generator } = await generateJson(env, { system, prompt, schema: CoverLetterSchema });
   const content = data.letter_markdown.trim();
   return insertDocument(env, {
@@ -133,7 +202,7 @@ export async function generateAnswers(env: Env, jobId: number, questions?: strin
   const { job, profile, cv } = await loadInputs(env, jobId);
   const qs = questions?.map((q) => q.trim()).filter(Boolean);
   const finalQuestions = qs?.length ? qs : DEFAULT_QUESTIONS(job.company);
-  const { system, prompt } = answersPrompt(profile, cv.content, job, finalQuestions, compactPrompts(env));
+  const { system, prompt } = answersPrompt(profile, documentText(cv.content), job, finalQuestions, compactPrompts(env));
   const { data, generator } = await generateJson(env, { system, prompt, schema: AnswersSchema });
   const content = renderAnswersMarkdown(data);
   return insertDocument(env, {
@@ -151,8 +220,11 @@ export async function generateAnswers(env: Env, jobId: number, questions?: strin
   });
 }
 
+/** Re-runs the fabrication checks after the user edits a generated document. */
 export function reverify(kind: Document["kind"], profile: Profile, masterCv: Document | null, content: string, jobDescription: string): string[] {
   if (!masterCv) return [];
-  const checks = verifyGenerated(content, { evidence: evidence(profile, masterCv), context: jobDescription });
-  return kind === "tailored_cv" ? [...missingContactDetails(content, masterCv.content), ...checks] : checks;
+  const checks = verifyGenerated(documentText(content), { evidence: evidence(profile, masterCv), context: jobDescription });
+  if (kind !== "tailored_cv") return checks;
+  const unreadable = isLatexCv(content) && !parseLatexCv(content) ? ["This LaTeX couldn't be read. Check for unbalanced braces."] : [];
+  return [...unreadable, ...missingContactDetails(headerText(content), headerText(masterCv.content)), ...checks];
 }

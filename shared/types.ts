@@ -147,6 +147,8 @@ export interface Grounding {
 }
 
 export interface DocumentMeta {
+  /** "latex" for documents in the résumé template (shared/cvTemplate.ts). */
+  format?: "latex" | "markdown";
   generator?: string;
   filename?: string;
   changes?: DocumentChange[];

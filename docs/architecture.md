@@ -67,6 +67,18 @@ Every job gets an explainable 0–100 score without calling a model:
 Include keywords add up to 8 points; an exclude keyword caps the score at 15.
 On demand, **Analyze Fit** asks the model for a written assessment grounded in the CV.
 
+### CV template
+
+Tailored CVs always use the résumé LaTeX template in [`shared/cvTemplate.ts`](../shared/cvTemplate.ts) (preamble and macros such as
+`\resumeSubheadingSpaced`, `\resumeProjectHeadingSpaced`, `\resumeItem`). [`shared/cv.ts`](../shared/cv.ts) parses a master `.tex` written
+with those macros into a structured document (header, entries, items, skill lines), and renders structured documents back to LaTeX,
+HTML (preview and print) and plain text (matching, diffs, checks).
+
+When the master CV is LaTeX, the model only returns *choices*: which entries to include and in what order, reworded bullets, and the order
+of existing skills. `applyTailoring()` applies them to the master, so the header, section titles, organizations, roles, dates, locations and
+headings are copied verbatim, unknown entries are ignored, skills not in the master are dropped, and bullet counts can't grow. Masters that
+aren't LaTeX (PDF, DOCX, Markdown) are rebuilt into the same template structure from their text, with a warning to upload the `.tex`.
+
 ### Preventing fabrication
 
 1. Every prompt includes strict grounding rules: only facts from the master CV and profile, no new metrics or technologies, no inflated scope.

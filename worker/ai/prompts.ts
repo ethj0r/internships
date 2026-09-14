@@ -2,9 +2,12 @@
 // Every prompt is grounded in the candidate's own material; see GROUNDING_RULES.
 
 import { z } from "zod";
+import { cvForPrompt, type CvDoc } from "../../shared/cv";
 import { ROLE_LABELS } from "../../shared/roles";
 import type { JobDetail, MatchResult, Profile } from "../../shared/types";
 import { truncate } from "../lib/text";
+
+const ChangesSchema = z.array(z.object({ section: z.string(), change: z.string(), reason: z.string() }));
 
 export const FitAnalysisSchema = z.object({
   summary: z.string(),
@@ -15,9 +18,27 @@ export const FitAnalysisSchema = z.object({
   talking_points: z.array(z.string()),
 });
 
-export const TailoredCvSchema = z.object({
-  cv_markdown: z.string(),
-  changes: z.array(z.object({ section: z.string(), change: z.string(), reason: z.string() })),
+/** Choices applied to a LaTeX master CV (see applyTailoring in shared/cv.ts). */
+export const CvTailoringSchema = z.object({
+  entries: z.array(z.object({ id: z.string(), bullets: z.array(z.string()) })),
+  skills: z.array(z.object({ label: z.string(), items: z.array(z.string()) })),
+  changes: ChangesSchema,
+});
+
+/** A complete CV in the template's structure, for masters that aren't LaTeX. */
+export const FullCvSchema = z.object({
+  name: z.string(),
+  contacts: z.array(z.object({ text: z.string(), url: z.string() })),
+  sections: z.array(
+    z.object({
+      title: z.string(),
+      kind: z.enum(["entries", "items", "skills"]),
+      entries: z.array(z.object({ title: z.string(), title_right: z.string(), subtitle: z.string(), subtitle_right: z.string(), bullets: z.array(z.string()) })),
+      items: z.array(z.object({ heading: z.string(), date: z.string(), bullets: z.array(z.string()) })),
+      skill_lines: z.array(z.object({ label: z.string(), items: z.array(z.string()) })),
+    }),
+  ),
+  changes: ChangesSchema,
 });
 
 export const CoverLetterSchema = z.object({
@@ -87,29 +108,58 @@ Evaluate the fit. Fields:
   };
 }
 
-export function tailorCvPrompt(profile: Profile, masterCv: string, job: JobDetail, compact: boolean) {
+const TEMPLATE_NOTE =
+  "The CV is typeset with the candidate's fixed LaTeX résumé template. You only choose and reword content: layout, section titles, organizations, roles, dates, locations, headings and contact details are filled in from the master CV automatically.";
+
+/** Tailoring for a LaTeX master CV: choose entries, reword bullets, order skills. */
+export function tailorCvPrompt(profile: Profile, master: CvDoc, job: JobDetail, compact: boolean) {
   return {
-    system: `You tailor a student's CV for one specific internship without changing any facts.\n\n${GROUNDING_RULES}`,
+    system: `You tailor a student's CV for one specific internship without changing any facts. ${TEMPLATE_NOTE}\n\n${GROUNDING_RULES}`,
+    prompt: `<candidate_profile>
+${profileBlock(profile)}
+</candidate_profile>
+
+<master_cv>
+${JSON.stringify(cvForPrompt(master), null, compact ? undefined : 2)}
+</master_cv>
+
+${jobBlock(job, compact)}
+
+Tailor the CV for this job.
+
+entries: every entry to include, using the exact ids from master_cv. Within each section, list entries in the order they should appear, most relevant to this job first.
+- Always include every entry of a section marked always_included.
+- Keep entries that show skills or experience this job values, and leave out entries that add little for this role. A section with no entries listed is removed, so list at least one entry for every section worth keeping. Keep the CV substantial: most experiences and the most relevant projects.
+- bullets: rewrite that entry's master bullets so what matters most for this job comes first, using the posting's terminology only where it accurately describes the work. Keep the same facts and a similar length. Use at most as many bullets as the master entry has, or an empty list to keep the master bullets unchanged.
+- Put **double asterisks** around key technologies, methods and outcomes, the way the master bullets do.
+- Never move a fact from one entry to another, and never add tools, numbers, scope or results that the entry's own master bullets don't state.
+
+skills: for each skill line, its label and the items to show, most relevant to this job first. Only use items that already appear in that line.
+
+changes: each meaningful change, with the section, what changed, and why it helps for this job.`,
+  };
+}
+
+/** Tailoring for a master CV that isn't LaTeX: rebuild it in the template's structure. */
+export function tailorCvFromTextPrompt(profile: Profile, masterCv: string, job: JobDetail, compact: boolean) {
+  return {
+    system: `You tailor a student's CV for one specific internship without changing any facts. The result is typeset with a fixed LaTeX résumé template, so you return its content as structured fields.\n\n${GROUNDING_RULES}`,
     prompt: `${candidateBlock(profile, masterCv, compact)}
 
 ${jobBlock(job, compact)}
 
-Produce a tailored version of the master CV for this job.
+Produce a tailored CV for this job in the template's structure.
 
-Allowed:
-- Reorder sections and bullets so the most relevant material comes first.
-- Choose which projects and experiences to include; drop or shorten less relevant ones.
-- Rewrite bullets for clarity, and use the posting's terminology only where it accurately describes what the candidate did.
-- Tighten or add a short summary built only from facts in the CV.
-- Regroup the skills list so the relevant skills come first (only skills already listed or clearly demonstrated in the CV).
+- name and contacts: exactly as in the master CV (phone, email, website, LinkedIn, GitHub). Use the link as url, or an empty string when there isn't one.
+- sections, in this order when the master CV has them: Education, Technical Skills, Certifications & Awards, Experiences, Leadership & Activities, Projects, Research Papers. Don't add sections the master CV doesn't have, such as a summary or objective.
+  - Education, Experiences, Leadership & Activities use kind "entries": title is the school or organization; subtitle is the degree or role. For Education, title_right is the dates and subtitle_right the location; for the others, title_right is the location and subtitle_right the dates.
+  - Certifications & Awards, Projects, Research Papers use kind "items": heading is the name in **bold**, then " | " and details such as technologies or issuer; date is the date.
+  - Technical Skills uses kind "skills" with skill_lines, each a label and its items.
+  - Leave the arrays a section doesn't use empty.
+- Copy organizations, roles, degrees, dates and locations exactly. Choose the entries most relevant to this job and order them by relevance within each section; keep all education.
+- Rewrite bullets so what matters most for this job comes first, using the posting's terminology only where it accurately describes the work. Put **double asterisks** around key technologies and outcomes.
 
-Not allowed:
-- Adding any skill, tool, project, employer, metric, date, or responsibility that is not in the master CV.
-- Changing names, contact details, dates, titles, or education details.
-
-Format: the complete CV as Markdown with the same structure as the master CV (# Name, ## Section, - bullets). Aim for one page unless the master CV is longer and all of it is relevant.
-
-In changes, list each meaningful change: the section, what changed, and why it helps for this job.`,
+changes: each meaningful change, with the section, what changed, and why it helps for this job.`,
   };
 }
 

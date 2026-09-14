@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { isLatexCv } from "../../shared/cv";
 import { rescoreAll } from "../discovery/run";
 import { generateAnswers, generateCoverLetter, generateTailoredCv, reverify } from "../documents/generate";
 import {
@@ -18,7 +19,7 @@ import { idParam, notFound, readJson, type AppEnv } from "../lib/validate";
 export const documents = new Hono<AppEnv>();
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
-const TEXT_EXTENSIONS = new Set(["md", "markdown", "txt"]);
+const TEXT_EXTENSIONS = new Set(["tex", "md", "markdown", "txt"]);
 const CONVERTIBLE_EXTENSIONS = new Set(["pdf", "docx", "odt", "html", "htm"]);
 
 function rescoreInBackground(c: Context<AppEnv>) {
@@ -82,10 +83,13 @@ documents.post("/master", async (c) => {
   content = content.trim();
   if (!content) throw new HTTPException(422, { message: "No text found. Try another file, or paste your CV." });
 
+  const format = isLatexCv(content) ? "latex" : "markdown";
+  if (format === "latex" && title === "Master CV") title = "Master CV (LaTeX)";
+
   const db = c.env.DB;
   const row = await db
     .prepare("INSERT INTO documents (kind, title, content, meta, is_active) VALUES ('master_cv', ?, ?, ?, 1) RETURNING id")
-    .bind(title, content, JSON.stringify(filename ? { filename } : {}))
+    .bind(title, content, JSON.stringify({ ...(filename ? { filename } : {}), format }))
     .first<{ id: number }>();
   if (!row) throw new Error("Couldn't save the CV.");
   await db.batch([

@@ -1,5 +1,6 @@
 // Discovery orchestration: fetch sources → filter relevant internships → normalize → dedupe → score → store → notify.
 
+import { documentText } from "../../shared/cv";
 import { isRelevantInternship } from "../../shared/roles";
 import type { DiscoveryRun, JobSkills, SourceKind, Workplace } from "../../shared/types";
 import { chunk, eventStmt, getActiveMasterCv, getProfile, nowIso, parseJson, placeholders } from "../lib/db";
@@ -11,7 +12,7 @@ import type { RawJob, SourceRef } from "./types";
 
 export async function loadMatchContext(db: D1Database): Promise<MatchContext> {
   const [profile, cv] = await Promise.all([getProfile(db), getActiveMasterCv(db)]);
-  return buildMatchContext(profile, cv?.content ?? null);
+  return buildMatchContext(profile, cv ? documentText(cv.content) : null);
 }
 
 function isoOrNull(value: string | null | undefined): string | null {

@@ -11,7 +11,7 @@ Built on Cloudflare Workers, D1 and Workers AI (optionally Claude), with a React
 - **Discover.** Checks Greenhouse, Lever and Ashby company boards and The Muse every hour for software, backend, frontend, full-stack, AI/ML and data internships. Skips duplicates, including the same role listed on two platforms.
 - **Match.** Scores every posting 0–100 on skills, role, location and eligibility, and explains why: matching skills, missing requirements, concerns such as graduation year, sponsorship or PhD-only roles.
 - **Track.** A pipeline from Interested to Preparing, Ready to Apply, Applied, Interview, and Offer or Rejected, with priority, notes, deadlines, reminders and a full history.
-- **Tailor.** Generates a tailored CV from your master CV, and shows exactly what changed. Cover letters and application answers too. Drafts only use facts from your CV; anything that isn't backed by it is flagged for review.
+- **Tailor.** Generates a tailored CV from your master CV in your LaTeX résumé template (download the `.tex`, open it in Overleaf, or print a matching PDF), and shows exactly what changed. Cover letters and application answers too. Drafts only use facts from your CV; anything that isn't backed by it is flagged for review.
 - **Apply.** An Apply Kit with your approved CV (save as PDF), cover letter, copy-ready answers, the application link and a checklist. You submit on the company's site, then confirm. Nothing is ever submitted for you.
 
 ## Tech stack

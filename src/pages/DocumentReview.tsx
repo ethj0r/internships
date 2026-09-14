@@ -1,14 +1,17 @@
 import { diffWords } from "diff";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
+import { documentText, isLatexCv, parseLatexCv } from "../../shared/cv";
 import type { Document } from "../../shared/types";
 import { ErrorState, Loading, Markdown, Segmented, Warnings } from "../components/common";
+import { CvPreview } from "../components/CvPreview";
 import { Icon, Spinner } from "../components/Icon";
-import { MenuButton } from "../components/Menu";
+import { MenuButton, type MenuItem } from "../components/Menu";
 import { Sheet } from "../components/Sheet";
 import { useToast } from "../components/Toast";
 import { api } from "../lib/api";
-import { KIND_LABELS, markdownToPlainText, relativeTime } from "../lib/format";
+import { downloadTex, openInOverleaf, texFilename } from "../lib/cvExport";
+import { copyableText, KIND_LABELS, relativeTime } from "../lib/format";
 import { invalidate, useAction, useDocumentTitle, useResource } from "../lib/hooks";
 
 type Mode = "changes" | "edit" | "preview";
@@ -23,9 +26,11 @@ export function DocumentReview() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   useDocumentTitle(doc?.title);
 
+  const content = draft ?? doc?.content ?? "";
+  const isLatex = isLatexCv(content);
+  const cv = useMemo(() => (isLatex ? parseLatexCv(content) : null), [isLatex, content]);
   const hasDiff = doc?.kind === "tailored_cv" && Boolean(doc.meta.parentContent);
   const currentMode: Mode = mode ?? (hasDiff && doc?.status === "draft" ? "changes" : doc?.kind === "master_cv" && doc.content.length < 40 ? "edit" : "preview");
-  const content = draft ?? doc?.content ?? "";
   const dirty = draft !== null && draft !== doc?.content;
 
   useEffect(() => {
@@ -80,6 +85,7 @@ export function DocumentReview() {
   if (!doc) return <div className="page">{loading ? <Loading /> : error && <ErrorState error={error} onRetry={() => void reload()} />}</div>;
 
   const isMaster = doc.kind === "master_cv";
+  const filename = texFilename(doc.title);
   const modes: { value: Mode; label: string }[] = [
     ...(hasDiff ? [{ value: "changes" as const, label: "Changes" }] : []),
     { value: "preview", label: "Preview" },
@@ -87,6 +93,31 @@ export function DocumentReview() {
   ];
   const warnings = doc.meta.warnings ?? [];
   const canRevert = doc.generatedContent && content !== doc.generatedContent;
+
+  const menu: MenuItem[] = [
+    ...(isLatex
+      ? [
+          { key: "tex", label: "Download .tex", onSelect: () => downloadTex(content, filename) },
+          { key: "overleaf", label: "Open in Overleaf", onSelect: () => openInOverleaf(content, filename) },
+        ]
+      : []),
+    { key: "print", label: "Print or Save as PDF", separatorBefore: isLatex, onSelect: () => window.open(`/print/${doc.id}`, "_blank", "noopener") },
+    { key: "copy", label: "Copy as Plain Text", onSelect: () => void navigator.clipboard.writeText(copyableText(content)).then(() => toast.show("Copied")) },
+    ...(canRevert
+      ? [
+          {
+            key: "revert",
+            label: "Revert to Generated Version",
+            onSelect: () => {
+              setDraft(doc.generatedContent);
+              setMode("edit");
+            },
+          },
+        ]
+      : []),
+    ...(doc.status === "approved" ? [{ key: "unapprove", label: "Move Back to Draft", onSelect: () => void setStatus("draft") }] : []),
+    { key: "delete", label: "Delete…", destructive: true, separatorBefore: true, onSelect: () => setConfirmDelete(true) },
+  ];
 
   return (
     <div className="page">
@@ -98,18 +129,7 @@ export function DocumentReview() {
         <span className="spacer" />
         <Segmented label="View" value={currentMode} options={modes} onChange={setMode} />
         <span className="spacer" />
-        <MenuButton
-          className="btn btn-plain btn-icon"
-          label="More"
-          align="end"
-          items={[
-            { key: "print", label: "Print or Save as PDF", onSelect: () => window.open(`/print/${doc.id}`, "_blank", "noopener") },
-            { key: "copy", label: "Copy as Plain Text", onSelect: () => void navigator.clipboard.writeText(markdownToPlainText(content)).then(() => toast.show("Copied")) },
-            ...(canRevert ? [{ key: "revert", label: "Revert to Generated Version", onSelect: () => { setDraft(doc.generatedContent); setMode("edit"); } }] : []),
-            ...(doc.status === "approved" ? [{ key: "unapprove", label: "Move Back to Draft", onSelect: () => void setStatus("draft") }] : []),
-            { key: "delete", label: "Delete…", destructive: true, separatorBefore: true, onSelect: () => setConfirmDelete(true) },
-          ]}
-        >
+        <MenuButton className="btn btn-plain btn-icon" label="More" align="end" items={menu}>
           <Icon name="ellipsis" />
         </MenuButton>
         {dirty && (
@@ -132,43 +152,78 @@ export function DocumentReview() {
           ))}
       </div>
 
-      <div className="page-inner">
-        <header style={{ marginBottom: 24 }}>
-          <p className="detail-company">{doc.job ? `${doc.job.company}, ${doc.job.title}` : KIND_LABELS[doc.kind]}</p>
-          <h1 className="title-1" style={{ marginTop: 2 }}>
-            {doc.title}
-          </h1>
-          <p className="subhead muted" style={{ marginTop: 6 }}>
-            {isMaster
-              ? doc.meta.filename
-                ? `Extracted from ${doc.meta.filename}. Check the text converted cleanly.`
-                : `Updated ${relativeTime(doc.updatedAt).toLowerCase()}`
-              : `${doc.status === "approved" ? "Approved" : "Draft"}${doc.meta.generator ? `, written by ${doc.meta.generator}` : ""}, ${relativeTime(doc.createdAt).toLowerCase()}`}
-          </p>
+      <div className="page-inner wide">
+        <header className="hstack wrap" style={{ marginBottom: 24, alignItems: "flex-end", justifyContent: "space-between" }}>
+          <div style={{ minWidth: 0 }}>
+            <p className="detail-company">{doc.job ? `${doc.job.company}, ${doc.job.title}` : KIND_LABELS[doc.kind]}</p>
+            <h1 className="title-1" style={{ marginTop: 2 }}>
+              {doc.title}
+            </h1>
+            <p className="subhead muted" style={{ marginTop: 6 }}>
+              {isMaster
+                ? doc.meta.filename
+                  ? `From ${doc.meta.filename}${isLatex ? "" : ". Check the text converted cleanly."}`
+                  : `Updated ${relativeTime(doc.updatedAt).toLowerCase()}`
+                : `${doc.status === "approved" ? "Approved" : "Draft"}${doc.meta.generator ? `, written by ${doc.meta.generator}` : ""}, ${relativeTime(doc.createdAt).toLowerCase()}`}
+            </p>
+          </div>
+          {isLatex && (
+            <div className="hstack">
+              <button type="button" className="btn btn-sm" onClick={() => downloadTex(content, filename)}>
+                <Icon name="upload" style={{ transform: "rotate(180deg)" }} />
+                Download .tex
+              </button>
+              <button type="button" className="btn btn-sm" onClick={() => openInOverleaf(content, filename)}>
+                <Icon name="external" />
+                Open in Overleaf
+              </button>
+            </div>
+          )}
         </header>
+
+        {isMaster && !isLatex && (
+          <div className="notice" style={{ marginBottom: 24 }}>
+            <Icon name="doc" />
+            <span>
+              Tailored CVs use your LaTeX résumé template. For exact wording and layout, upload your résumé's <strong>.tex</strong> file under Documents instead of a
+              PDF.
+            </span>
+          </div>
+        )}
 
         {warnings.length > 0 && (
           <div style={{ marginBottom: 24 }}>
-            <Warnings
-              title={warnings.length === 1 ? "Check this before using it" : `Check these ${warnings.length} things before using it`}
-              warnings={warnings}
-            />
+            <Warnings title={warnings.length === 1 ? "Check this before using it" : `Check these ${warnings.length} things before using it`} warnings={warnings} />
           </div>
         )}
 
         {currentMode === "changes" && hasDiff && <ChangesView doc={doc} content={content} />}
-        {currentMode === "preview" && (
-          <div className="paper">
-            <Markdown source={content} />
-          </div>
-        )}
+        {currentMode === "preview" &&
+          (isLatex ? (
+            cv ? (
+              <div className="cv-sheet">
+                <CvPreview doc={cv} />
+              </div>
+            ) : (
+              <div className="notice notice-error" role="alert">
+                <Icon name="warning" />
+                <span>This LaTeX couldn't be read for the preview. Check the Edit view for unbalanced braces, or download the .tex file.</span>
+              </div>
+            )
+          ) : (
+            <div className="paper">
+              <Markdown source={content} />
+            </div>
+          ))}
         {currentMode === "edit" && (
           <div className="field">
             <label className="sr-only" htmlFor="doc-editor">
               Document text
             </label>
-            <textarea id="doc-editor" className="textarea editor" value={content} onChange={(e) => setDraft(e.target.value)} spellCheck />
-            <p className="field-hint">Markdown: # Name, ## Section, - bullet, **bold**. Press ⌘S to save.</p>
+            <textarea id="doc-editor" className="textarea editor" value={content} onChange={(e) => setDraft(e.target.value)} spellCheck={!isLatex} />
+            <p className="field-hint">
+              {isLatex ? "LaTeX source in your résumé template. Press ⌘S to save." : "Markdown: # Name, ## Section, - bullet, **bold**. Press ⌘S to save."}
+            </p>
           </div>
         )}
 
@@ -212,7 +267,10 @@ export function DocumentReview() {
 }
 
 function ChangesView({ doc, content }: { doc: Document; content: string }) {
-  const parts = useMemo(() => diffWords(doc.meta.parentContent ?? "", content), [doc.meta.parentContent, content]);
+  const parts = useMemo(
+    () => diffWords(documentText(doc.meta.parentContent ?? "", { urls: false }), documentText(content, { urls: false })),
+    [doc.meta.parentContent, content],
+  );
   const changes = doc.meta.changes ?? [];
   return (
     <>

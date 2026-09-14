@@ -1,12 +1,15 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
+import { isLatexCv, parseLatexCv } from "../../shared/cv";
 import type { ApplyKit, Document } from "../../shared/types";
 import { ErrorState, Loading, Markdown } from "../components/common";
+import { CvPreview } from "../components/CvPreview";
+import { downloadTex, texFilename } from "../lib/cvExport";
 import { Icon, Spinner } from "../components/Icon";
 import { ConfirmAppliedSheet, invalidateTracking, StatusMenu, SUBMITTED_STATUSES } from "../components/StatusMenu";
 import { useToast } from "../components/Toast";
 import { api } from "../lib/api";
-import { deadlineLabel, formatDate, hostname, KIND_LABELS, markdownToPlainText } from "../lib/format";
+import { copyableText, deadlineLabel, formatDate, hostname, KIND_LABELS } from "../lib/format";
 import { invalidate, useAction, useDocumentTitle, useResource } from "../lib/hooks";
 
 export function ApplyKitPage() {
@@ -52,7 +55,7 @@ export function ApplyKitPage() {
 
   const { job, application } = kit;
   const submitted = SUBMITTED_STATUSES.includes(application.status);
-  const copy = (doc: Document) => void navigator.clipboard.writeText(markdownToPlainText(doc.content)).then(() => toast.show(`${KIND_LABELS[doc.kind]} copied`));
+  const copy = (doc: Document) => void navigator.clipboard.writeText(copyableText(doc.content)).then(() => toast.show(`${KIND_LABELS[doc.kind]} copied`));
 
   const docFor: Record<string, { doc: Document | null; kind: "tailored_cv" | "cover_letter" | "answers"; create: string }> = {
     cv: { doc: kit.cv, kind: "tailored_cv", create: "Tailor CV" },
@@ -206,15 +209,21 @@ function CopyRow({ label, value }: { label: string; value: string }) {
 }
 
 function MaterialSection({ doc, onCopy, printable }: { kit: ApplyKit; doc: Document; onCopy: (doc: Document) => void; printable?: boolean }) {
+  const cv = useMemo(() => (isLatexCv(doc.content) ? parseLatexCv(doc.content) : null), [doc.content]);
   return (
     <section className="section">
       <div className="section-header">
         <h2 className="section-title">{KIND_LABELS[doc.kind]}</h2>
-        <div className="hstack">
+        <div className="hstack wrap" style={{ justifyContent: "flex-end" }}>
           <button type="button" className="btn btn-sm" onClick={() => onCopy(doc)}>
             <Icon name="copy" />
             Copy Text
           </button>
+          {cv && (
+            <button type="button" className="btn btn-sm" onClick={() => downloadTex(doc.content, texFilename(doc.title))}>
+              Download .tex
+            </button>
+          )}
           {printable && (
             <a className="btn btn-sm" href={`/print/${doc.id}`} target="_blank" rel="noopener">
               <Icon name="printer" />
@@ -228,9 +237,15 @@ function MaterialSection({ doc, onCopy, printable }: { kit: ApplyKit; doc: Docum
           Draft. <Link to={`/documents/${doc.id}`}>Review and approve it</Link> before using it.
         </p>
       )}
-      <div className="paper">
-        <Markdown source={doc.content} />
-      </div>
+      {cv ? (
+        <div className="cv-sheet">
+          <CvPreview doc={cv} />
+        </div>
+      ) : (
+        <div className="paper">
+          <Markdown source={doc.content} />
+        </div>
+      )}
     </section>
   );
 }
