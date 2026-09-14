@@ -1,0 +1,26 @@
+# Dependencies & build output
+node_modules/
+dist/
+.wrangler/
+*.tsbuildinfo
+
+# Local secrets — never commit
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+
+# Private user data (CV exports, local DB dumps)
+*.sqlite
+*.sqlite3
+backups/
+exports/
+
+# OS / editor
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.log
