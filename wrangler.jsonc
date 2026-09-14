@@ -1,6 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "internships",
+  // Personal Cloudflare account. Deploys fail rather than land in another account.
+  "account_id": "14422e9f56eff5e77f6ec8f261191e53",
   "main": "worker/index.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -15,7 +17,7 @@
     {
       "binding": "DB",
       "database_name": "internships",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "ef295b91-bd57-4334-a194-8672e6ea6fa0",
       "migrations_dir": "migrations"
     }
   ],
