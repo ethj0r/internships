@@ -1,0 +1,141 @@
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
+import type { Source, SourceKind } from "../../shared/types";
+import { adapterFor } from "../discovery/registry";
+import { runDiscovery } from "../discovery/run";
+import { eventStmt, parseJson } from "../lib/db";
+import { idParam, notFound, readJson, type AppEnv } from "../lib/validate";
+
+export const sources = new Hono<AppEnv>();
+export const discovery = new Hono<AppEnv>();
+
+interface SourceRow {
+  id: number;
+  kind: SourceKind;
+  identifier: string;
+  name: string;
+  enabled: number;
+  last_run_at: string | null;
+  last_status: "ok" | "error" | null;
+  last_error: string | null;
+  last_found: number;
+  job_count: number;
+}
+
+const SOURCE_SELECT = `SELECT s.*, (SELECT COUNT(*) FROM jobs j WHERE j.source_id = s.id AND j.closed_at IS NULL AND j.duplicate_of IS NULL) AS job_count FROM sources s`;
+
+function toSource(r: SourceRow): Source {
+  return {
+    id: r.id,
+    kind: r.kind,
+    identifier: r.identifier,
+    name: r.name,
+    enabled: r.enabled === 1,
+    lastRunAt: r.last_run_at,
+    lastStatus: r.last_status,
+    lastError: r.last_error,
+    lastFound: r.last_found,
+    jobCount: r.job_count,
+  };
+}
+
+/** Accepts a board token or a pasted board URL, e.g. https://boards.greenhouse.io/stripe. */
+function parseIdentifier(kind: SourceKind, input: string): string {
+  const value = input.trim();
+  const patterns: Partial<Record<SourceKind, RegExp>> = {
+    greenhouse: /greenhouse\.io\/(?:embed\/job_board\?for=)?([\w-]+)/i,
+    lever: /lever\.co\/([\w.-]+)/i,
+    ashby: /ashbyhq\.com\/([^/?#]+)/i,
+  };
+  const match = patterns[kind]?.exec(value);
+  return match ? decodeURIComponent(match[1]!) : value;
+}
+
+sources.get("/", async (c) => {
+  const { results } = await c.env.DB.prepare(`${SOURCE_SELECT} ORDER BY s.kind = 'manual', s.name COLLATE NOCASE`).all<SourceRow>();
+  return c.json(results.map(toSource));
+});
+
+const CreateBody = z.object({
+  kind: z.enum(["greenhouse", "lever", "ashby", "themuse"]),
+  identifier: z.string().trim().min(1).max(200),
+});
+
+sources.post("/", async (c) => {
+  const body = await readJson(c, CreateBody);
+  const identifier = parseIdentifier(body.kind, body.identifier);
+  const adapter = adapterFor(body.kind)!;
+  let name: string;
+  try {
+    name = await adapter.resolveName(identifier);
+  } catch {
+    throw new HTTPException(422, { message: `Couldn't find a ${body.kind === "themuse" ? "The Muse category" : `${body.kind} board`} called “${identifier}”.` });
+  }
+  const db = c.env.DB;
+  const row = await db
+    .prepare("INSERT INTO sources (kind, identifier, name) VALUES (?, ?, ?) ON CONFLICT (kind, identifier) DO NOTHING RETURNING id")
+    .bind(body.kind, identifier, name)
+    .first<{ id: number }>();
+  if (!row) throw new HTTPException(409, { message: `${name} is already a source.` });
+  await eventStmt(db, "source", row.id, "created", { kind: body.kind, identifier }).run();
+  const created = await db.prepare(`${SOURCE_SELECT} WHERE s.id = ?`).bind(row.id).first<SourceRow>();
+  return c.json(toSource(created!), 201);
+});
+
+sources.patch("/:id", async (c) => {
+  const id = idParam(c);
+  const body = await readJson(c, z.object({ enabled: z.boolean().optional(), name: z.string().trim().min(1).max(200).optional() }));
+  const db = c.env.DB;
+  const current = await db.prepare("SELECT kind, enabled, name FROM sources WHERE id = ?").bind(id).first<{ kind: SourceKind; enabled: number; name: string }>();
+  if (!current) throw notFound("Source");
+  if (current.kind === "manual") throw new HTTPException(400, { message: "The manual source can't be changed." });
+  const stmts: D1PreparedStatement[] = [];
+  if (body.enabled !== undefined && body.enabled !== (current.enabled === 1)) {
+    stmts.push(db.prepare("UPDATE sources SET enabled = ? WHERE id = ?").bind(body.enabled ? 1 : 0, id));
+    stmts.push(eventStmt(db, "source", id, body.enabled ? "enabled" : "disabled"));
+  }
+  if (body.name && body.name !== current.name) stmts.push(db.prepare("UPDATE sources SET name = ? WHERE id = ?").bind(body.name, id));
+  if (stmts.length) await db.batch(stmts);
+  return c.json(toSource((await db.prepare(`${SOURCE_SELECT} WHERE s.id = ?`).bind(id).first<SourceRow>())!));
+});
+
+sources.delete("/:id", async (c) => {
+  const id = idParam(c);
+  const db = c.env.DB;
+  const current = await db.prepare("SELECT kind, name FROM sources WHERE id = ?").bind(id).first<{ kind: SourceKind; name: string }>();
+  if (!current) throw notFound("Source");
+  if (current.kind === "manual") throw new HTTPException(400, { message: "The manual source can't be removed." });
+  // Jobs stay (source_id becomes NULL) so tracked applications and history are preserved.
+  await db.batch([db.prepare("DELETE FROM sources WHERE id = ?").bind(id), eventStmt(db, "source", id, "deleted", { name: current.name })]);
+  return c.body(null, 204);
+});
+
+sources.post("/:id/run", async (c) => c.json(await runDiscovery(c.env, { trigger: "manual", sourceIds: [idParam(c)] })));
+
+discovery.post("/run", async (c) => c.json(await runDiscovery(c.env, { trigger: "manual" })));
+
+discovery.get("/runs", async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT * FROM discovery_runs ORDER BY id DESC LIMIT 20").all<{
+    id: number;
+    trigger: "cron" | "manual";
+    started_at: string;
+    finished_at: string | null;
+    sources_checked: number;
+    jobs_seen: number;
+    jobs_new: number;
+    errors: string;
+  }>();
+  return c.json(
+    results.map((r) => ({
+      id: r.id,
+      trigger: r.trigger,
+      startedAt: r.started_at,
+      finishedAt: r.finished_at,
+      sourcesChecked: r.sources_checked,
+      jobsSeen: r.jobs_seen,
+      jobsNew: r.jobs_new,
+      errors: parseJson(r.errors, []),
+    })),
+  );
+});
