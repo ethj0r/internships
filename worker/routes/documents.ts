@@ -3,13 +3,11 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { isLatexCv } from "../../shared/cv";
 import { rescoreAll } from "../discovery/run";
-import { generateAnswers, generateCoverLetter, generateTailoredCv, reverify } from "../documents/generate";
+import { generateAnswers, generateCoverLetter, generateTailoredCv, metaAfterEdit, reviewDocument } from "../documents/generate";
 import {
   DOCUMENT_SUMMARY_SELECT,
   eventStmt,
-  getActiveMasterCv,
   getDocument,
-  getProfile,
   nowIso,
   toDocumentSummary,
   type DocumentRow,
@@ -108,8 +106,8 @@ documents.post("/tailor", async (c) => {
 });
 
 documents.post("/cover-letter", async (c) => {
-  const { jobId } = await readJson(c, JobBody);
-  return c.json(await getDocument(c.env.DB, await generateCoverLetter(c.env, jobId)), 201);
+  const { jobId, angle } = await readJson(c, JobBody.extend({ angle: z.string().max(1000).optional() }));
+  return c.json(await getDocument(c.env.DB, await generateCoverLetter(c.env, jobId, angle)), 201);
 });
 
 documents.post("/answers", async (c) => {
@@ -117,15 +115,22 @@ documents.post("/answers", async (c) => {
   return c.json(await getDocument(c.env.DB, await generateAnswers(c.env, jobId, questions)), 201);
 });
 
-documents.get("/:id", async (c) => {
-  const db = c.env.DB;
-  const doc = await getDocument(db, idParam(c));
+async function documentWithParent(db: D1Database, id: number) {
+  const doc = await getDocument(db, id);
   if (!doc) throw notFound("Document");
   if (doc.parentId) {
     const parent = await db.prepare("SELECT content FROM documents WHERE id = ?").bind(doc.parentId).first<{ content: string }>();
     if (parent) doc.meta.parentContent = parent.content;
   }
-  return c.json(doc);
+  return doc;
+}
+
+documents.get("/:id", async (c) => c.json(await documentWithParent(c.env.DB, idParam(c))));
+
+documents.post("/:id/review", async (c) => {
+  const id = idParam(c);
+  await reviewDocument(c.env, id);
+  return c.json(await documentWithParent(c.env.DB, id));
 });
 
 const PatchBody = z.object({
@@ -158,14 +163,8 @@ documents.patch("/:id", async (c) => {
     stmts.push(eventStmt(db, "document", id, "edited", { kind: doc.kind }));
     if (doc.kind === "master_cv") rescore = doc.isActive;
     else if (doc.jobId) {
-      const [profile, master, job] = await Promise.all([
-        getProfile(db),
-        doc.parentId ? getDocument(db, doc.parentId) : getActiveMasterCv(db),
-        db.prepare("SELECT description FROM jobs WHERE id = ?").bind(doc.jobId).first<{ description: string }>(),
-      ]);
-      const meta = { ...doc.meta, warnings: reverify(doc.kind, profile, master, body.content, job?.description ?? "") };
       sets.push("meta = ?");
-      params.push(JSON.stringify(meta));
+      params.push(JSON.stringify(await metaAfterEdit(c.env, doc, body.content)));
     }
   }
   if (body.status && body.status !== doc.status) {

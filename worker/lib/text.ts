@@ -123,7 +123,7 @@ export function detectWorkplace(location: string, title: string, description: st
   if (/on-?site|in[- ]office/.test(h)) return "onsite";
   const head = `${location} ${title}`;
   if (/hybrid/i.test(head)) return "hybrid";
-  if (/remote/i.test(head)) return "remote";
+  if (/remote|home[- ]based|work from home|\bwf[ah]\b/i.test(head)) return "remote";
   if (/\b(fully remote|remote[- ]first|100% remote|work from anywhere)\b/i.test(description)) return "remote";
   if (/\bhybrid\b/i.test(description)) return "hybrid";
   return location.trim() ? "onsite" : "unknown";

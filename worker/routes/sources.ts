@@ -4,7 +4,8 @@ import { z } from "zod";
 import type { Source, SourceKind } from "../../shared/types";
 import { adapterFor } from "../discovery/registry";
 import { runDiscovery } from "../discovery/run";
-import { eventStmt, parseJson } from "../lib/db";
+import { eventStmt, getProfile, parseJson } from "../lib/db";
+import { scopeFilter } from "../lib/scope";
 import { idParam, notFound, readJson, type AppEnv } from "../lib/validate";
 
 export const sources = new Hono<AppEnv>();
@@ -23,7 +24,18 @@ interface SourceRow {
   job_count: number;
 }
 
-const SOURCE_SELECT = `SELECT s.*, (SELECT COUNT(*) FROM jobs j WHERE j.source_id = s.id AND j.closed_at IS NULL AND j.duplicate_of IS NULL) AS job_count FROM sources s`;
+/** Sources with their open, in-search-area job counts. `tail` is appended after FROM (WHERE / ORDER BY). */
+async function querySources(db: D1Database, tail: string, ...binds: (string | number)[]): Promise<SourceRow[]> {
+  const scope = scopeFilter((await getProfile(db)).searchScope);
+  const { results } = await db
+    .prepare(
+      `SELECT s.*, (SELECT COUNT(*) FROM jobs j WHERE j.source_id = s.id AND j.closed_at IS NULL AND j.duplicate_of IS NULL${scope ? ` AND ${scope.sql}` : ""}) AS job_count
+       FROM sources s ${tail}`,
+    )
+    .bind(...(scope?.params ?? []), ...binds)
+    .all<SourceRow>();
+  return results;
+}
 
 function toSource(r: SourceRow): Source {
   return {
@@ -40,6 +52,21 @@ function toSource(r: SourceRow): Source {
   };
 }
 
+type AddableKind = Exclude<SourceKind, "manual">;
+
+const ADDABLE_KINDS = ["greenhouse", "lever", "ashby", "smartrecruiters", "workable", "catapa", "themuse", "himalayas"] as const satisfies readonly AddableKind[];
+
+const DESCRIPTIONS: Record<AddableKind, string> = {
+  greenhouse: "Greenhouse board",
+  lever: "Lever board",
+  ashby: "Ashby board",
+  smartrecruiters: "SmartRecruiters company",
+  workable: "Workable account",
+  catapa: "CATAPA career page",
+  themuse: "The Muse category",
+  himalayas: "Himalayas country",
+};
+
 /** Accepts a board token or a pasted board URL, e.g. https://boards.greenhouse.io/stripe. */
 function parseIdentifier(kind: SourceKind, input: string): string {
   const value = input.trim();
@@ -47,18 +74,22 @@ function parseIdentifier(kind: SourceKind, input: string): string {
     greenhouse: /greenhouse\.io\/(?:embed\/job_board\?for=)?([\w-]+)/i,
     lever: /lever\.co\/([\w.-]+)/i,
     ashby: /ashbyhq\.com\/([^/?#]+)/i,
+    smartrecruiters: /(?:jobs|careers)\.smartrecruiters\.com\/([\w.-]+)/i,
+    workable: /apply\.workable\.com\/([\w-]+)|([\w-]+)\.workable\.com/i,
+    catapa: /career\.catapa\.com\/([\w-]+)/i,
   };
   const match = patterns[kind]?.exec(value);
-  return match ? decodeURIComponent(match[1]!) : value;
+  const captured = match?.slice(1).find(Boolean);
+  return captured ? decodeURIComponent(captured) : value;
 }
 
 sources.get("/", async (c) => {
-  const { results } = await c.env.DB.prepare(`${SOURCE_SELECT} ORDER BY s.kind = 'manual', s.name COLLATE NOCASE`).all<SourceRow>();
+  const results = await querySources(c.env.DB, "ORDER BY s.kind = 'manual', s.name COLLATE NOCASE");
   return c.json(results.map(toSource));
 });
 
 const CreateBody = z.object({
-  kind: z.enum(["greenhouse", "lever", "ashby", "themuse"]),
+  kind: z.enum(ADDABLE_KINDS),
   identifier: z.string().trim().min(1).max(200),
 });
 
@@ -70,7 +101,7 @@ sources.post("/", async (c) => {
   try {
     name = await adapter.resolveName(identifier);
   } catch {
-    throw new HTTPException(422, { message: `Couldn't find a ${body.kind === "themuse" ? "The Muse category" : `${body.kind} board`} called “${identifier}”.` });
+    throw new HTTPException(422, { message: `Couldn't find a ${DESCRIPTIONS[body.kind]} called “${identifier}”.` });
   }
   const db = c.env.DB;
   const row = await db
@@ -79,7 +110,7 @@ sources.post("/", async (c) => {
     .first<{ id: number }>();
   if (!row) throw new HTTPException(409, { message: `${name} is already a source.` });
   await eventStmt(db, "source", row.id, "created", { kind: body.kind, identifier }).run();
-  const created = await db.prepare(`${SOURCE_SELECT} WHERE s.id = ?`).bind(row.id).first<SourceRow>();
+  const [created] = await querySources(db, "WHERE s.id = ?", row.id);
   return c.json(toSource(created!), 201);
 });
 
@@ -97,7 +128,8 @@ sources.patch("/:id", async (c) => {
   }
   if (body.name && body.name !== current.name) stmts.push(db.prepare("UPDATE sources SET name = ? WHERE id = ?").bind(body.name, id));
   if (stmts.length) await db.batch(stmts);
-  return c.json(toSource((await db.prepare(`${SOURCE_SELECT} WHERE s.id = ?`).bind(id).first<SourceRow>())!));
+  const [updated] = await querySources(db, "WHERE s.id = ?", id);
+  return c.json(toSource(updated!));
 });
 
 sources.delete("/:id", async (c) => {

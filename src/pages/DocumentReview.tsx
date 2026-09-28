@@ -7,6 +7,7 @@ import { ErrorState, Loading, Markdown, Segmented, Warnings } from "../component
 import { CvPreview } from "../components/CvPreview";
 import { Icon, Spinner } from "../components/Icon";
 import { MenuButton, type MenuItem } from "../components/Menu";
+import { LetterReasoning, QualityReviewPanel, TailoringView, useExportGuard } from "../components/Personalization";
 import { Sheet } from "../components/Sheet";
 import { useToast } from "../components/Toast";
 import { api } from "../lib/api";
@@ -14,7 +15,7 @@ import { downloadTex, openInOverleaf, texFilename } from "../lib/cvExport";
 import { copyableText, KIND_LABELS, relativeTime } from "../lib/format";
 import { invalidate, useAction, useDocumentTitle, useResource } from "../lib/hooks";
 
-type Mode = "changes" | "edit" | "preview";
+type Mode = "tailoring" | "reasoning" | "changes" | "edit" | "preview";
 
 export function DocumentReview() {
   const id = Number(useParams().docId);
@@ -30,7 +31,12 @@ export function DocumentReview() {
   const isLatex = isLatexCv(content);
   const cv = useMemo(() => (isLatex ? parseLatexCv(content) : null), [isLatex, content]);
   const hasDiff = doc?.kind === "tailored_cv" && Boolean(doc.meta.parentContent);
-  const currentMode: Mode = mode ?? (hasDiff && doc?.status === "draft" ? "changes" : doc?.kind === "master_cv" && doc.content.length < 40 ? "edit" : "preview");
+  const hasTailoring = doc?.kind === "tailored_cv" && Boolean(doc.meta.bulletChanges?.length || doc.meta.strategy);
+  const hasReasoning = doc?.kind === "cover_letter" && Boolean(doc.meta.plan);
+  const reviewable = doc?.kind === "tailored_cv" || doc?.kind === "cover_letter";
+  const defaultMode: Mode =
+    doc?.status === "draft" && hasTailoring ? "tailoring" : doc?.status === "draft" && hasDiff ? "changes" : doc?.kind === "master_cv" && doc.content.length < 40 ? "edit" : "preview";
+  const currentMode = mode ?? defaultMode;
   const dirty = draft !== null && draft !== doc?.content;
 
   useEffect(() => {
@@ -41,7 +47,7 @@ export function DocumentReview() {
   }, [dirty]);
 
   const afterChange = (updated: Document) => {
-    mutate({ ...updated, meta: { ...updated.meta, parentContent: doc?.meta.parentContent } });
+    mutate({ ...updated, meta: { ...updated.meta, parentContent: updated.meta.parentContent ?? doc?.meta.parentContent } });
     invalidate("documents", "overview", "kit:", "applications", "events", ...(updated.jobId ? [`job:${updated.jobId}`] : []));
   };
 
@@ -51,7 +57,7 @@ export function DocumentReview() {
     afterChange(updated);
     setDraft(null);
     toast.show("Changes saved");
-    if (updated.kind === "master_cv") invalidate("jobs", "job:");
+    if (updated.kind === "master_cv") invalidate("jobs", "job:", "knowledge");
     return updated;
   }, toast.error);
 
@@ -63,6 +69,14 @@ export function DocumentReview() {
     toast.show(status === "approved" ? `${KIND_LABELS[doc.kind]} approved` : "Moved back to draft");
   }, toast.error);
 
+  const [runReview, reviewing] = useAction(async () => {
+    if (!doc) return;
+    if (dirty && !(await save())) return;
+    const updated = await api.reviewDocument(doc.id);
+    afterChange(updated);
+    toast.show(updated.meta.review?.verdict === "ready" ? "Ready to send" : "The review found things to fix");
+  }, toast.error);
+
   const [remove] = useAction(async () => {
     if (!doc) return;
     await api.deleteDocument(doc.id);
@@ -70,6 +84,19 @@ export function DocumentReview() {
     toast.show(`${KIND_LABELS[doc.kind]} deleted`);
     navigate(doc.jobId ? `/jobs/${doc.jobId}` : "/documents", { replace: true });
   }, toast.error);
+
+  const { guard, sheet: exportSheet } = useExportGuard(doc, {
+    dirty,
+    onReview: () => {
+      const review = doc?.meta.review;
+      if (dirty || !review || review.stale) {
+        void runReview();
+        return;
+      }
+      if (currentMode === "edit") setMode("preview");
+      requestAnimationFrame(() => document.getElementById("quality-review")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    },
+  });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -87,22 +114,31 @@ export function DocumentReview() {
   const isMaster = doc.kind === "master_cv";
   const filename = texFilename(doc.title);
   const modes: { value: Mode; label: string }[] = [
-    ...(hasDiff ? [{ value: "changes" as const, label: "Changes" }] : []),
+    ...(hasTailoring ? [{ value: "tailoring" as const, label: "Tailoring" }] : []),
+    ...(hasReasoning ? [{ value: "reasoning" as const, label: "Reasoning" }] : []),
+    ...(hasDiff ? [{ value: "changes" as const, label: "Diff" }] : []),
     { value: "preview", label: "Preview" },
     { value: "edit", label: "Edit" },
   ];
   const warnings = doc.meta.warnings ?? [];
   const canRevert = doc.generatedContent && content !== doc.generatedContent;
+  const download = guard("Download", () => downloadTex(content, filename));
+  const overleaf = guard("Open", () => openInOverleaf(content, filename));
 
   const menu: MenuItem[] = [
     ...(isLatex
       ? [
-          { key: "tex", label: "Download .tex", onSelect: () => downloadTex(content, filename) },
-          { key: "overleaf", label: "Open in Overleaf", onSelect: () => openInOverleaf(content, filename) },
+          { key: "tex", label: "Download .tex", onSelect: download },
+          { key: "overleaf", label: "Open in Overleaf", onSelect: overleaf },
         ]
       : []),
-    { key: "print", label: "Print or Save as PDF", separatorBefore: isLatex, onSelect: () => window.open(`/print/${doc.id}`, "_blank", "noopener") },
-    { key: "copy", label: "Copy as Plain Text", onSelect: () => void navigator.clipboard.writeText(copyableText(content)).then(() => toast.show("Copied")) },
+    { key: "print", label: "Print or Save as PDF", separatorBefore: isLatex, onSelect: guard("Print", () => window.open(`/print/${doc.id}`, "_blank", "noopener")) },
+    {
+      key: "copy",
+      label: "Copy as Plain Text",
+      onSelect: guard("Copy", () => void navigator.clipboard.writeText(copyableText(content)).then(() => toast.show("Copied"))),
+    },
+    ...(reviewable ? [{ key: "review", label: "Run Quality Review", onSelect: () => void runReview() }] : []),
     ...(canRevert
       ? [
           {
@@ -145,7 +181,7 @@ export function DocumentReview() {
               Approved
             </span>
           ) : (
-            <button type="button" className="btn btn-primary" onClick={() => void setStatus("approved")} disabled={statusPending}>
+            <button type="button" className="btn btn-primary" onClick={guard("Approve", () => void setStatus("approved"))} disabled={statusPending}>
               {statusPending && <Spinner />}
               Approve
             </button>
@@ -169,11 +205,11 @@ export function DocumentReview() {
           </div>
           {isLatex && (
             <div className="hstack">
-              <button type="button" className="btn btn-sm" onClick={() => downloadTex(content, filename)}>
+              <button type="button" className="btn btn-sm" onClick={download}>
                 <Icon name="upload" style={{ transform: "rotate(180deg)" }} />
                 Download .tex
               </button>
-              <button type="button" className="btn btn-sm" onClick={() => openInOverleaf(content, filename)}>
+              <button type="button" className="btn btn-sm" onClick={overleaf}>
                 <Icon name="external" />
                 Open in Overleaf
               </button>
@@ -197,6 +233,14 @@ export function DocumentReview() {
           </div>
         )}
 
+        {reviewable && currentMode !== "edit" && (
+          <div style={{ marginBottom: 32 }}>
+            <QualityReviewPanel id="quality-review" review={doc.meta.review} running={reviewing} onRun={() => void runReview()} />
+          </div>
+        )}
+
+        {currentMode === "tailoring" && <TailoringView meta={doc.meta} />}
+        {currentMode === "reasoning" && <LetterReasoning meta={doc.meta} />}
         {currentMode === "changes" && hasDiff && <ChangesView doc={doc} content={content} />}
         {currentMode === "preview" &&
           (isLatex ? (
@@ -223,11 +267,12 @@ export function DocumentReview() {
             <textarea id="doc-editor" className="textarea editor" value={content} onChange={(e) => setDraft(e.target.value)} spellCheck={!isLatex} />
             <p className="field-hint">
               {isLatex ? "LaTeX source in your résumé template. Press ⌘S to save." : "Markdown: # Name, ## Section, - bullet, **bold**. Press ⌘S to save."}
+              {reviewable && " Saving marks the quality review out of date."}
             </p>
           </div>
         )}
 
-        {doc.meta.grounding && doc.meta.grounding.length > 0 && currentMode !== "edit" && (
+        {doc.meta.grounding && doc.meta.grounding.length > 0 && (currentMode === "preview" || currentMode === "reasoning") && (
           <section className="section">
             <div className="section-header">
               <h2 className="section-title">{doc.kind === "answers" ? "Sources for each answer" : "Where each claim comes from"}</h2>
@@ -246,6 +291,7 @@ export function DocumentReview() {
         )}
       </div>
 
+      {exportSheet}
       <Sheet
         open={confirmDelete}
         onClose={() => setConfirmDelete(false)}
@@ -277,7 +323,7 @@ function ChangesView({ doc, content }: { doc: Document; content: string }) {
       {changes.length > 0 && (
         <section style={{ marginBottom: 32 }}>
           <div className="section-header">
-            <h2 className="section-title">What changed</h2>
+            <h2 className="section-title">Structure</h2>
           </div>
           <div className="group">
             {changes.map((c, i) => (

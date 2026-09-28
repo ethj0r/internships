@@ -1,4 +1,4 @@
-// LLM access behind one function. Claude is used when ANTHROPIC_API_KEY is configured;
+// LLM access behind a few functions. Claude is used when ANTHROPIC_API_KEY is configured;
 // otherwise Workers AI (no extra credentials needed on Cloudflare).
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -6,6 +6,7 @@ import { z } from "zod";
 
 export const CLAUDE_MODEL = "claude-opus-5";
 export const WORKERS_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 export class AiError extends Error {
   constructor(
@@ -64,13 +65,22 @@ export async function generateJson<S extends z.ZodType>(
   return { data: parsed.data, generator: aiProviderName(env) };
 }
 
+function toAiError(err: unknown): unknown {
+  if (err instanceof AiError) return err;
+  if (err instanceof SyntaxError) return new AiError("The model returned invalid JSON. Try again.");
+  if (err instanceof Anthropic.AuthenticationError) return new AiError("ANTHROPIC_API_KEY was rejected. Update the secret.", 500);
+  if (err instanceof Anthropic.RateLimitError) return new AiError("Claude's rate limit was reached. Try again in a minute.", 429);
+  if (err instanceof Anthropic.APIError) return new AiError(`Claude API error (${err.status ?? "network"}). Try again.`);
+  return err;
+}
+
 async function callClaude(env: Env, system: string, prompt: string, schema: Record<string, unknown>): Promise<unknown> {
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   try {
     const stream = client.beta.messages.stream({
       model: CLAUDE_MODEL,
       max_tokens: 32000,
-      betas: ["server-side-fallback-2026-07-01"],
+      betas: [FALLBACK_BETA],
       fallbacks: "default",
       thinking: { type: "adaptive" },
       system,
@@ -85,12 +95,44 @@ async function callClaude(env: Env, system: string, prompt: string, schema: Reco
     const text = message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
     return JSON.parse(text);
   } catch (err) {
-    if (err instanceof AiError) throw err;
-    if (err instanceof SyntaxError) throw new AiError("The model returned invalid JSON. Try again.");
-    if (err instanceof Anthropic.AuthenticationError) throw new AiError("ANTHROPIC_API_KEY was rejected. Update the secret.", 500);
-    if (err instanceof Anthropic.RateLimitError) throw new AiError("Claude's rate limit was reached. Try again in a minute.", 429);
-    if (err instanceof Anthropic.APIError) throw new AiError(`Claude API error (${err.status ?? "network"}). Try again.`);
-    throw err;
+    throw toAiError(err);
+  }
+}
+
+/**
+ * Claude with server-side web search and fetch, for research that must cite public sources. Returns every
+ * content block so callers can keep only cited statements. Requires Claude; callers check usesClaude() first.
+ */
+export async function researchWeb(env: Env, request: { system: string; prompt: string }): Promise<Anthropic.Beta.BetaContentBlock[]> {
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: request.prompt }];
+  const content: Anthropic.Beta.BetaContentBlock[] = [];
+  try {
+    // Long server-tool turns stop with "pause_turn"; sending the paused turn back resumes it.
+    for (let turn = 0; turn < 4; turn++) {
+      const message = await client.beta.messages
+        .stream({
+          model: CLAUDE_MODEL,
+          max_tokens: 16000,
+          betas: [FALLBACK_BETA],
+          fallbacks: "default",
+          thinking: { type: "adaptive" },
+          system: request.system,
+          messages,
+          tools: [
+            { type: "web_search_20260209", name: "web_search", max_uses: 6 },
+            { type: "web_fetch_20260209", name: "web_fetch", max_uses: 4 },
+          ],
+        })
+        .finalMessage();
+      if (message.stop_reason === "refusal") throw new AiError("Claude declined the company research.");
+      content.push(...message.content);
+      if (message.stop_reason !== "pause_turn") break;
+      messages.push({ role: "assistant", content: message.content });
+    }
+    return content;
+  } catch (err) {
+    throw toAiError(err);
   }
 }
 

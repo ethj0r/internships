@@ -1,3 +1,4 @@
+import type { JobInsights, KnowledgeBase, KnowledgeNote } from "../../shared/personalization";
 import type {
   Application,
   ApplicationStatus,
@@ -6,7 +7,6 @@ import type {
   DiscoveryRun,
   Document,
   DocumentSummary,
-  FitAnalysis,
   JobDetail,
   JobSummary,
   Notification,
@@ -61,6 +61,7 @@ export interface JobQuery {
   view?: "inbox" | "tracked" | "dismissed" | "all";
   q?: string;
   workplace?: string;
+  region?: "indonesia" | "asia";
   minScore?: number;
   source?: string;
   sort?: "score" | "newest" | "deadline";
@@ -69,6 +70,7 @@ export interface JobQuery {
 }
 
 export type ProfileInput = Omit<Profile, "updatedAt">;
+export type NoteInput = Pick<KnowledgeNote, "entryKey" | "kind" | "title" | "body" | "links">;
 
 export const api = {
   session: () => request<{ authenticated: boolean; configured: boolean }>("GET", "/auth/session"),
@@ -81,7 +83,7 @@ export const api = {
   job: (id: number) => request<JobDetail>("GET", `/jobs/${id}`),
   jobEvents: (id: number) => request<AuditEvent[]>("GET", `/jobs/${id}/events`),
   updateJob: (id: number, patch: { deadline?: string | null; dismissed?: boolean }) => request<JobDetail>("PATCH", `/jobs/${id}`, patch),
-  analyzeJob: (id: number) => request<FitAnalysis>("POST", `/jobs/${id}/analyze`, {}),
+  analyzeRole: (id: number) => request<JobInsights>("POST", `/jobs/${id}/insights`, {}),
   importJobUrl: (url: string) => request<{ id: number; created: boolean; duplicateOf: number | null }>("POST", "/jobs/import", { url }),
   importJobManual: (manual: { company: string; title: string; location?: string; url?: string; description?: string; deadline?: string | null }) =>
     request<{ id: number; created: boolean; duplicateOf: number | null }>("POST", "/jobs/import", { manual }),
@@ -117,8 +119,14 @@ export const api = {
     request<Document>("PATCH", `/documents/${id}`, patch),
   deleteDocument: (id: number) => request<void>("DELETE", `/documents/${id}`),
   tailorCv: (jobId: number) => request<Document>("POST", "/documents/tailor", { jobId }),
-  coverLetter: (jobId: number) => request<Document>("POST", "/documents/cover-letter", { jobId }),
+  coverLetter: (jobId: number, angle?: string) => request<Document>("POST", "/documents/cover-letter", { jobId, angle }),
   answers: (jobId: number, questions?: string[]) => request<Document>("POST", "/documents/answers", { jobId, questions }),
+  reviewDocument: (id: number) => request<Document>("POST", `/documents/${id}/review`, {}),
+
+  knowledge: () => request<KnowledgeBase>("GET", "/knowledge"),
+  createNote: (note: NoteInput) => request<KnowledgeNote>("POST", "/knowledge/notes", note),
+  updateNote: (id: number, note: Partial<NoteInput>) => request<KnowledgeNote>("PATCH", `/knowledge/notes/${id}`, note),
+  deleteNote: (id: number) => request<void>("DELETE", `/knowledge/notes/${id}`),
 
   profile: () => request<Profile>("GET", "/profile"),
   saveProfile: (profile: ProfileInput) => request<Profile>("PUT", "/profile", profile),

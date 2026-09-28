@@ -1,5 +1,6 @@
-// AI-assisted analysis and document generation. Drafts are always saved for review;
-// nothing generated here is used in an application until the user approves it.
+// Evidence-based document generation (docs/personalization.md). Every document starts from the job's insights
+// (requirement → evidence map and strategy), cites the knowledge base, passes deterministic checks and a quality
+// review, and is regenerated once when the review finds it isn't ready. Drafts still need the user's approval.
 
 import { HTTPException } from "hono/http-exception";
 import type { z } from "zod";
@@ -13,44 +14,46 @@ import {
   isLatexCv,
   parseLatexCv,
   type CvDoc,
+  type CvEntry,
+  type CvItem,
   type CvSection,
 } from "../../shared/cv";
-import type { Document, DocumentChange, FitAnalysis, JobDetail, Profile } from "../../shared/types";
+import {
+  COVER_LETTER_CRITERIA,
+  CV_CRITERIA,
+  type BulletChange,
+  type EvidenceItem,
+  type JobInsights,
+  type LetterPlan,
+  type OmittedEntry,
+  type QualityCriterion,
+  type QualityIssue,
+  type QualityReview,
+} from "../../shared/personalization";
+import type { Document, DocumentChange, DocumentMeta, Grounding } from "../../shared/types";
 import {
   AnswersSchema,
   answersPrompt,
-  CoverLetterSchema,
-  coverLetterPrompt,
-  CvTailoringSchema,
+  coverLetterPlanPrompt,
+  coverLetterWritePrompt,
+  CvPlanSchema,
+  CvReviewSchema,
   DEFAULT_QUESTIONS,
-  FitAnalysisSchema,
-  fitAnalysisPrompt,
   FullCvSchema,
+  LetterPlanSchema,
+  LetterReviewSchema,
+  LetterSchema,
   renderAnswersMarkdown,
+  reviewPrompt,
   tailorCvFromTextPrompt,
   tailorCvPrompt,
 } from "../ai/prompts";
-import { compactPrompts, generateJson } from "../ai/provider";
-import { eventStmt, getActiveMasterCv, getJobDetailRow, getProfile, nowIso, toJobDetail } from "../lib/db";
+import { AiError, compactPrompts, generateJson } from "../ai/provider";
+import { eventStmt, getDocument, getLatestJobDocument, getProfile, nowIso } from "../lib/db";
 import { missingContactDetails, verifyGenerated } from "../matching/verify";
-
-interface Inputs {
-  job: JobDetail;
-  profile: Profile;
-  cv: Document;
-}
-
-async function loadInputs(env: Env, jobId: number): Promise<Inputs> {
-  const row = await getJobDetailRow(env.DB, jobId);
-  if (!row) throw new HTTPException(404, { message: "Job not found." });
-  const [profile, cv] = await Promise.all([getProfile(env.DB), getActiveMasterCv(env.DB)]);
-  if (!cv || !cv.content.trim()) throw new HTTPException(400, { message: "Add your master CV first, under Documents." });
-  return { job: toJobDetail(row, [], []), profile, cv };
-}
-
-function evidence(profile: Profile, cv: Document): string {
-  return [documentText(cv.content), profile.skills.join(", "), profile.education, profile.headline, profile.links.map((l) => l.url).join(" ")].join("\n");
-}
+import { ensureInsights, loadContext, type Context } from "../personalization/insights";
+import { evidenceText, groupEvidence, loadKnowledge } from "../personalization/knowledge";
+import { applyBulletProposals, cvIssues, letterIssues } from "../personalization/validate";
 
 /** Moves a tracked job into Preparing (or starts tracking it) when documents are generated. */
 async function markPreparing(env: Env, jobId: number): Promise<D1PreparedStatement[]> {
@@ -71,7 +74,7 @@ async function markPreparing(env: Env, jobId: number): Promise<D1PreparedStateme
 
 async function insertDocument(
   env: Env,
-  doc: { kind: Document["kind"]; title: string; jobId: number; parentId: number; content: string; meta: Record<string, unknown> },
+  doc: { kind: Document["kind"]; title: string; jobId: number; parentId: number; content: string; meta: DocumentMeta },
 ): Promise<number> {
   const row = await env.DB.prepare(
     `INSERT INTO documents (kind, title, job_id, parent_id, content, generated_content, meta) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
@@ -79,7 +82,9 @@ async function insertDocument(
     .bind(doc.kind, doc.title, doc.jobId, doc.parentId, doc.content, doc.content, JSON.stringify(doc.meta))
     .first<{ id: number }>();
   if (!row) throw new Error("Couldn't save the generated document.");
-  const stmts = [eventStmt(env.DB, "document", row.id, "generated", { kind: doc.kind, jobId: doc.jobId, generator: doc.meta.generator })];
+  const stmts = [
+    eventStmt(env.DB, "document", row.id, "generated", { kind: doc.kind, jobId: doc.jobId, generator: doc.meta.generator, verdict: doc.meta.review?.verdict }),
+  ];
   stmts.push(...(await markPreparing(env, doc.jobId)));
   await env.DB.batch(stmts);
   return row.id;
@@ -90,24 +95,131 @@ async function versionedTitle(env: Env, jobId: number, kind: Document["kind"], b
   return row && row.n > 0 ? `${base} (v${row.n + 1})` : base;
 }
 
-export async function analyzeFit(env: Env, jobId: number): Promise<FitAnalysis> {
-  const { job, profile, cv } = await loadInputs(env, jobId);
-  const { system, prompt } = fitAnalysisPrompt(profile, documentText(cv.content), job, job.matchDetail, compactPrompts(env));
-  const { data, generator } = await generateJson(env, { system, prompt, schema: FitAnalysisSchema });
-  const analysis: FitAnalysis = {
-    summary: data.summary,
-    strengths: data.strengths,
-    gaps: data.gaps,
-    concerns: data.concerns,
-    keyQualifications: data.key_qualifications,
-    talkingPoints: data.talking_points,
+/** Rebuilds a job's insights: requirements, evidence map, strategy and company research. */
+export async function analyzeJob(env: Env, jobId: number): Promise<JobInsights> {
+  return ensureInsights(env, await loadContext(env, jobId), { refresh: true });
+}
+
+// ---------- Quality review ----------
+
+type ReviewData = z.infer<typeof CvReviewSchema> | z.infer<typeof LetterReviewSchema>;
+
+function toReview(data: ReviewData, criteria: readonly QualityCriterion[], checks: QualityIssue[], attempts: number, generator: string): QualityReview {
+  const scores = criteria.map((criterion) => {
+    const s = data.scores.find((x) => x.criterion === criterion);
+    return { criterion, score: s ? Math.min(5, Math.max(1, Math.round(s.score))) : 3, note: s?.note.trim() ?? "Not scored." };
+  });
+  const issues: QualityIssue[] = [
+    ...checks,
+    ...data.issues.map((i) => ({ severity: i.severity, message: [i.problem.trim(), i.fix.trim()].filter(Boolean).join(" "), quote: i.quote.trim(), source: "review" as const })),
+  ];
+  const ready = data.verdict === "ready" && !issues.some((i) => i.severity === "blocking") && scores.every((s) => s.score > 2);
+  return { verdict: ready ? "ready" : "needs_work", summary: data.summary.trim(), scores, issues, attempts, generator, reviewedAt: nowIso(), stale: false };
+}
+
+/** What the next attempt must fix: every blocking issue, then the weakest criteria. */
+function feedbackFrom(review: QualityReview): string[] {
+  const issues = review.issues.filter((i) => i.severity === "blocking").map((i) => (i.quote ? `${i.message} (“${i.quote}”)` : i.message));
+  const weak = review.scores.filter((s) => s.score <= 3).map((s) => `${s.criterion} scored ${s.score}/5: ${s.note}`);
+  const warnings = review.issues.filter((i) => i.severity === "warning").map((i) => i.message);
+  return [...issues, ...weak, ...warnings].slice(0, 14);
+}
+
+function reviewRank(r: QualityReview): [number, number] {
+  return [r.issues.filter((i) => i.severity === "blocking").length, -r.scores.reduce((sum, s) => sum + s.score, 0)];
+}
+
+/** Drafts, reviews, and redrafts once with the review's feedback if the first draft isn't ready. Keeps the better one. */
+async function draftWithReview<D>(draft: (feedback: string[]) => Promise<D>, review: (d: D, attempts: number) => Promise<QualityReview>) {
+  const first = await draft([]);
+  const firstReview = await review(first, 1);
+  if (firstReview.verdict === "ready") return { draft: first, review: firstReview };
+  const second = await draft(feedbackFrom(firstReview));
+  const secondReview = await review(second, 2);
+  const [a, b] = [reviewRank(firstReview), reviewRank(secondReview)];
+  return b[0] < a[0] || (b[0] === a[0] && b[1] <= a[1]) ? { draft: second, review: secondReview } : { draft: first, review: { ...firstReview, attempts: 2 } };
+}
+
+/** The evidence a document relies on, for showing next to its claims. */
+function citedEvidence(insights: JobInsights, ids: string[]): EvidenceItem[] {
+  const wanted = new Set([...ids, ...insights.matches.flatMap((m) => m.evidenceIds)]);
+  return insights.evidence.filter((e) => wanted.has(e.id));
+}
+
+// ---------- Tailored CV ----------
+
+interface CvDraft {
+  doc: CvDoc;
+  text: string;
+  generator: string;
+  changes: DocumentChange[];
+  bulletChanges: BulletChange[];
+  omitted: OmittedEntry[];
+  checks: QualityIssue[];
+  warnings: string[];
+}
+
+function cvChecks(ctx: Context, insights: JobInsights, text: string): QualityIssue[] {
+  return cvIssues(text, {
+    evidence: evidenceText(ctx.knowledge),
+    masterText: documentText(ctx.knowledge.master!.content, { urls: true }),
+    posting: ctx.job.description,
+    employerTerms: insights.requirements.flatMap((r) => r.employerTerms),
+  });
+}
+
+async function draftLatexCv(env: Env, ctx: Context, insights: JobInsights, feedback: string[]): Promise<CvDraft> {
+  const { knowledge: k, job, profile } = ctx;
+  const master = k.doc!;
+  const { data, generator } = await generateJson(env, { ...tailorCvPrompt({ profile, knowledge: k, job, insights, compact: compactPrompts(env), feedback }), schema: CvPlanSchema });
+
+  const located = new Map<string, { section: CvSection; x: CvEntry | CvItem }>();
+  for (const section of master.sections) {
+    const list: (CvEntry | CvItem)[] = section.type === "entries" ? section.entries : section.type === "items" ? section.items : [];
+    for (const x of list) located.set(x.id, { section, x });
+  }
+  const requirementIds = new Set(insights.requirements.map((r) => r.id));
+  const changesByEntry = new Map<string, BulletChange[]>();
+  const entries: { id: string; bullets: string[] }[] = [];
+  for (const proposal of data.entries) {
+    const found = located.get(proposal.id);
+    if (!found || changesByEntry.has(proposal.id)) continue;
+    const group = k.groupOfEntryId.get(proposal.id)!;
+    const support = groupEvidence(k, group);
+    const { bullets, changes } = applyBulletProposals({
+      masterBullets: found.x.bullets,
+      group,
+      support,
+      proposals: proposal.bullets,
+      drops: proposal.drop,
+      requirementIds,
+      section: found.section.title,
+      label: support[0]?.label ?? proposal.id,
+    });
+    changesByEntry.set(proposal.id, changes);
+    entries.push({ id: proposal.id, bullets });
+  }
+
+  const doc = applyTailoring(master, { entries, skills: data.skills, omit: data.omit.map((o) => o.id) }, job.skills);
+  const kept = new Set(doc.sections.flatMap((s) => (s.type === "entries" ? s.entries.map((e) => e.id) : s.type === "items" ? s.items.map((i) => i.id) : [])));
+  const omitted: OmittedEntry[] = [...located]
+    .filter(([id]) => !kept.has(id))
+    .map(([id, { section }]) => ({
+      section: section.title,
+      label: k.byId.get(`${k.groupOfEntryId.get(id)}.h`)?.label ?? id,
+      reason: data.omit.find((o) => o.id === id)?.reason.trim() || "Less relevant to this role than the entries kept.",
+    }));
+  const text = cvToPlainText(doc, { urls: true });
+  return {
+    doc,
+    text,
     generator,
+    changes: describeTailoring(master, doc).filter((c) => !c.change.startsWith("Left out")),
+    bulletChanges: [...changesByEntry].filter(([id]) => kept.has(id)).flatMap(([, c]) => c),
+    omitted,
+    checks: cvChecks(ctx, insights, text),
+    warnings: [],
   };
-  await env.DB.batch([
-    env.DB.prepare("UPDATE jobs SET ai_analysis = ?, ai_analyzed_at = ? WHERE id = ?").bind(JSON.stringify(analysis), nowIso(), jobId),
-    eventStmt(env.DB, "job", jobId, "analyzed", { generator }),
-  ]);
-  return analysis;
 }
 
 function sectionKey(title: string, index: number): string {
@@ -144,87 +256,283 @@ function fullCvToDoc(data: z.infer<typeof FullCvSchema>): CvDoc {
   };
 }
 
+/** Masters that aren't LaTeX are rebuilt in the template from their text; bullet-level tracing isn't possible. */
+async function draftTextCv(env: Env, ctx: Context, insights: JobInsights, feedback: string[]): Promise<CvDraft> {
+  const { knowledge: k, job, profile } = ctx;
+  const { data, generator } = await generateJson(env, { ...tailorCvFromTextPrompt({ profile, knowledge: k, job, insights, compact: compactPrompts(env), feedback }), schema: FullCvSchema });
+  const doc = fullCvToDoc(data);
+  const text = cvToPlainText(doc, { urls: true });
+  return {
+    doc,
+    text,
+    generator,
+    changes: data.changes,
+    bulletChanges: [],
+    omitted: [],
+    checks: cvChecks(ctx, insights, text),
+    warnings: [
+      "Your master CV isn't a LaTeX file, so the template was filled from its extracted text and bullet-by-bullet tracing isn't available. Upload your résumé's .tex source under Documents to keep its exact wording and structure.",
+      ...missingContactDetails(cvToPlainText({ header: doc.header, sections: [] }, { urls: true }), headerText(k.master!.content)),
+    ],
+  };
+}
+
+async function reviewCv(env: Env, ctx: Context, insights: JobInsights, draft: { text: string; checks: QualityIssue[] }, attempts: number): Promise<QualityReview> {
+  const { data, generator } = await generateJson(env, {
+    ...reviewPrompt({ kind: "cv", content: draft.text, knowledge: ctx.knowledge, job: ctx.job, insights, checks: draft.checks, compact: compactPrompts(env) }),
+    schema: CvReviewSchema,
+  });
+  return toReview(data, CV_CRITERIA, draft.checks, attempts, generator);
+}
+
 /** Tailored CVs are always LaTeX in the résumé template (shared/cvTemplate.ts). */
 export async function generateTailoredCv(env: Env, jobId: number): Promise<number> {
-  const { job, profile, cv } = await loadInputs(env, jobId);
-  const compact = compactPrompts(env);
-  const master = isLatexCv(cv.content) ? parseLatexCv(cv.content) : null;
-  const warnings: string[] = [];
-  let doc: CvDoc;
-  let changes: DocumentChange[];
-  let generator: string;
+  const ctx = await loadContext(env, jobId);
+  const insights = await ensureInsights(env, ctx);
+  const draftCv = ctx.knowledge.doc?.sections.length ? draftLatexCv : draftTextCv;
+  const { draft, review } = await draftWithReview(
+    (feedback) => draftCv(env, ctx, insights, feedback),
+    (d, attempts) => reviewCv(env, ctx, insights, d, attempts),
+  );
 
-  if (master?.sections.length) {
-    const { system, prompt } = tailorCvPrompt(profile, master, job, compact);
-    const result = await generateJson(env, { system, prompt, schema: CvTailoringSchema });
-    doc = applyTailoring(master, result.data, job.skills);
-    generator = result.generator;
-    changes = [...result.data.changes, ...describeTailoring(master, doc)];
-  } else {
-    const { system, prompt } = tailorCvFromTextPrompt(profile, documentText(cv.content), job, compact);
-    const result = await generateJson(env, { system, prompt, schema: FullCvSchema });
-    doc = fullCvToDoc(result.data);
-    generator = result.generator;
-    changes = result.data.changes;
-    warnings.push(
-      "Your master CV isn't a LaTeX file, so the template was filled from its extracted text. Upload your résumé's .tex source under Documents to keep its exact wording and structure.",
-      ...missingContactDetails(cvToPlainText({ header: doc.header, sections: [] }, { urls: true }), headerText(cv.content)),
-    );
-  }
-
-  warnings.push(...verifyGenerated(cvToPlainText(doc, { urls: true }), { evidence: evidence(profile, cv), context: job.description }));
   return insertDocument(env, {
     kind: "tailored_cv",
-    title: await versionedTitle(env, jobId, "tailored_cv", `CV for ${job.company}`),
+    title: await versionedTitle(env, jobId, "tailored_cv", `CV for ${ctx.job.company}`),
     jobId,
-    parentId: cv.id,
-    content: cvToLatex(doc),
-    meta: { generator, changes, warnings, format: "latex" },
+    parentId: ctx.knowledge.master!.id,
+    content: cvToLatex(draft.doc),
+    meta: {
+      format: "latex",
+      generator: draft.generator,
+      changes: draft.changes,
+      warnings: draft.warnings,
+      bulletChanges: draft.bulletChanges,
+      omitted: draft.omitted,
+      strategy: insights.strategy,
+      requirements: insights.requirements,
+      matches: insights.matches,
+      evidence: citedEvidence(insights, draft.bulletChanges.flatMap((b) => b.evidenceIds)),
+      review,
+    },
   });
 }
 
-export async function generateCoverLetter(env: Env, jobId: number): Promise<number> {
-  const { job, profile, cv } = await loadInputs(env, jobId);
-  const { system, prompt } = coverLetterPrompt(profile, documentText(cv.content), job, compactPrompts(env));
-  const { data, generator } = await generateJson(env, { system, prompt, schema: CoverLetterSchema });
+// ---------- Cover letter ----------
+
+interface LetterDraft {
+  content: string;
+  generator: string;
+  plan: LetterPlan;
+  grounding: Grounding[];
+  evidenceIds: string[];
+  checks: QualityIssue[];
+}
+
+/** The CV a cover letter accompanies: the job's approved or latest tailored CV, else the master. */
+async function letterCvText(env: Env, ctx: Context): Promise<string> {
+  const cv = await getLatestJobDocument(env.DB, ctx.job.id, "tailored_cv");
+  return documentText(cv?.content ?? ctx.knowledge.master!.content, { urls: false });
+}
+
+function letterChecks(ctx: Context, insights: JobInsights, content: string, cvText: string, angle: string): QualityIssue[] {
+  return letterIssues(content, {
+    company: ctx.job.company,
+    evidence: `${evidenceText(ctx.knowledge)}\n${documentText(ctx.knowledge.master!.content, { urls: true })}\n${angle}`,
+    posting: `${ctx.job.description}\n${insights.companyFacts.map((f) => f.text).join("\n")}`,
+    cvText,
+  });
+}
+
+const wordCount = (text: string) => text.split(/\s+/).filter(Boolean).length;
+
+async function draftLetter(env: Env, ctx: Context, insights: JobInsights, cvText: string, angle: string, feedback: string[]): Promise<LetterDraft> {
+  const { knowledge: k, job, profile } = ctx;
+  const input = { profile, knowledge: k, job, insights, cvText, angle, compact: compactPrompts(env), feedback };
+  const factIds = new Set(["posting", ...insights.companyFacts.map((f) => f.id)]);
+  const requirementIds = new Set(insights.requirements.map((r) => r.id));
+  const validEvidence = (ids: string[]) => [...new Set(ids)].filter((id) => k.byId.has(id) || (angle && id === "angle"));
+  const validFacts = (ids: string[]) => [...new Set(ids)].filter((id) => factIds.has(id));
+
+  const { data: p } = await generateJson(env, { ...coverLetterPlanPrompt(input), schema: LetterPlanSchema });
+  const narrative = p.narrative.map((n) => ({
+    need: n.need.trim(),
+    experience: n.experience.trim(),
+    whyItMatters: n.why_it_matters.trim(),
+    requirementIds: n.requirement_ids.filter((id) => requirementIds.has(id)),
+    evidenceIds: validEvidence(n.evidence_ids),
+  }));
+  const plan: LetterPlan = {
+    companyNeed: p.company_need.trim(),
+    whyRole: p.why_role.trim(),
+    whyCompany: p.why_company.trim(),
+    companyFactIds: validFacts(p.company_fact_ids),
+    narrative,
+    contribution: p.contribution.trim(),
+    motivation: p.motivation.trim(),
+  };
+
+  // Smaller models occasionally return an empty letter: retry once, then fail rather than save it.
+  const write = () => generateJson(env, { ...coverLetterWritePrompt({ ...input, plan }), schema: LetterSchema });
+  let written = await write();
+  if (wordCount(written.data.letter_markdown) < 120) written = await write();
+  const { data, generator } = written;
   const content = data.letter_markdown.trim();
+  if (wordCount(content) < 120) throw new AiError("The model didn't return a complete letter. Try again.");
+
+  const checks = letterChecks(ctx, insights, content, cvText, angle);
+  for (const claim of data.claims) {
+    if (!validEvidence(claim.evidence_ids).length && !validFacts(claim.company_fact_ids).length) {
+      checks.push({ severity: "blocking", message: "This claim doesn't trace to your knowledge base or to a cited source.", quote: claim.claim, source: "check" });
+    }
+  }
+
+  const sourceLabel = (id: string) => {
+    if (id === "angle") return "What you asked the letter to reflect";
+    if (id === "posting") return "Job posting";
+    const fact = insights.companyFacts.find((f) => f.id === id);
+    if (fact) return fact.sources.map((s) => s.title || s.url).join(", ");
+    const e = k.byId.get(id);
+    return e ? `${e.label} (${id})` : id;
+  };
+  return {
+    content,
+    generator,
+    checks,
+    plan,
+    grounding: data.claims.map((c) => ({
+      claim: c.claim,
+      source: [...validEvidence(c.evidence_ids), ...validFacts(c.company_fact_ids)].map(sourceLabel).join("; ") || "Nothing supports this claim.",
+    })),
+    evidenceIds: [...data.claims.flatMap((c) => validEvidence(c.evidence_ids)), ...narrative.flatMap((n) => n.evidenceIds)],
+  };
+}
+
+async function reviewLetter(
+  env: Env,
+  ctx: Context,
+  insights: JobInsights,
+  draft: { content: string; checks: QualityIssue[] },
+  cvText: string,
+  attempts: number,
+): Promise<QualityReview> {
+  const { data, generator } = await generateJson(env, {
+    ...reviewPrompt({ kind: "cover_letter", content: draft.content, knowledge: ctx.knowledge, job: ctx.job, insights, checks: draft.checks, cvText, compact: compactPrompts(env) }),
+    schema: LetterReviewSchema,
+  });
+  return toReview(data, COVER_LETTER_CRITERIA, draft.checks, attempts, generator);
+}
+
+export async function generateCoverLetter(env: Env, jobId: number, angle = ""): Promise<number> {
+  const ctx = await loadContext(env, jobId);
+  const insights = await ensureInsights(env, ctx);
+  const cvText = await letterCvText(env, ctx);
+  const { draft, review } = await draftWithReview(
+    (feedback) => draftLetter(env, ctx, insights, cvText, angle.trim(), feedback),
+    (d, attempts) => reviewLetter(env, ctx, insights, d, cvText, attempts),
+  );
+
   return insertDocument(env, {
     kind: "cover_letter",
-    title: await versionedTitle(env, jobId, "cover_letter", `Cover letter for ${job.company}`),
+    title: await versionedTitle(env, jobId, "cover_letter", `Cover letter for ${ctx.job.company}`),
     jobId,
-    parentId: cv.id,
-    content,
-    meta: { generator, grounding: data.grounding, warnings: verifyGenerated(content, { evidence: evidence(profile, cv), context: job.description }) },
+    parentId: ctx.knowledge.master!.id,
+    content: draft.content,
+    meta: {
+      generator: draft.generator,
+      grounding: draft.grounding,
+      warnings: [],
+      plan: draft.plan,
+      strategy: insights.strategy,
+      requirements: insights.requirements,
+      matches: insights.matches,
+      companyFacts: insights.companyFacts,
+      evidence: citedEvidence(insights, draft.evidenceIds),
+      review,
+      ...(angle.trim() ? { angle: angle.trim() } : {}),
+    },
   });
 }
 
+// ---------- Application answers ----------
+
 export async function generateAnswers(env: Env, jobId: number, questions?: string[]): Promise<number> {
-  const { job, profile, cv } = await loadInputs(env, jobId);
+  const ctx = await loadContext(env, jobId);
+  const insights = await ensureInsights(env, ctx);
   const qs = questions?.map((q) => q.trim()).filter(Boolean);
-  const finalQuestions = qs?.length ? qs : DEFAULT_QUESTIONS(job.company);
-  const { system, prompt } = answersPrompt(profile, documentText(cv.content), job, finalQuestions, compactPrompts(env));
-  const { data, generator } = await generateJson(env, { system, prompt, schema: AnswersSchema });
+  const finalQuestions = qs?.length ? qs : DEFAULT_QUESTIONS(ctx.job.company);
+  const { data, generator } = await generateJson(env, {
+    ...answersPrompt({ profile: ctx.profile, knowledge: ctx.knowledge, job: ctx.job, insights, questions: finalQuestions, compact: compactPrompts(env) }),
+    schema: AnswersSchema,
+  });
   const content = renderAnswersMarkdown(data);
   return insertDocument(env, {
     kind: "answers",
-    title: await versionedTitle(env, jobId, "answers", `Application answers for ${job.company}`),
+    title: await versionedTitle(env, jobId, "answers", `Application answers for ${ctx.job.company}`),
     jobId,
-    parentId: cv.id,
+    parentId: ctx.knowledge.master!.id,
     content,
     meta: {
       generator,
       questions: finalQuestions,
       grounding: data.answers.map((a) => ({ claim: a.question, source: a.based_on })),
-      warnings: verifyGenerated(content, { evidence: evidence(profile, cv), context: job.description }),
+      warnings: verifyGenerated(content, { evidence: evidenceText(ctx.knowledge), context: ctx.job.description }),
     },
   });
 }
 
-/** Re-runs the fabrication checks after the user edits a generated document. */
-export function reverify(kind: Document["kind"], profile: Profile, masterCv: Document | null, content: string, jobDescription: string): string[] {
-  if (!masterCv) return [];
-  const checks = verifyGenerated(documentText(content), { evidence: evidence(profile, masterCv), context: jobDescription });
-  if (kind !== "tailored_cv") return checks;
+// ---------- Review and edits ----------
+
+const blocking = (message: string): QualityIssue => ({ severity: "blocking", message, quote: "", source: "check" });
+
+/** Runs the quality review on a document's current content, e.g. after the user edits it. */
+export async function reviewDocument(env: Env, id: number): Promise<void> {
+  const doc = await getDocument(env.DB, id);
+  if (!doc) throw new HTTPException(404, { message: "Document not found." });
+  if (!doc.jobId || (doc.kind !== "tailored_cv" && doc.kind !== "cover_letter")) {
+    throw new HTTPException(400, { message: "Only tailored CVs and cover letters are reviewed." });
+  }
+  const ctx = await loadContext(env, doc.jobId);
+  const insights = await ensureInsights(env, ctx);
+  const attempts = doc.meta.review?.attempts ?? 1;
+
+  let review: QualityReview;
+  if (doc.kind === "tailored_cv") {
+    const text = documentText(doc.content, { urls: true });
+    const checks = [
+      ...(isLatexCv(doc.content) && !parseLatexCv(doc.content) ? [blocking("This LaTeX couldn't be read. Check for unbalanced braces.")] : []),
+      ...missingContactDetails(headerText(doc.content), headerText(ctx.knowledge.master!.content)).map(blocking),
+      ...cvChecks(ctx, insights, text),
+    ];
+    review = await reviewCv(env, ctx, insights, { text, checks }, attempts);
+  } else {
+    const cvText = await letterCvText(env, ctx);
+    const checks = letterChecks(ctx, insights, doc.content, cvText, doc.meta.angle ?? "");
+    review = await reviewLetter(env, ctx, insights, { content: doc.content, checks }, cvText, attempts);
+  }
+
+  const { parentContent: _omit, ...meta } = doc.meta;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE documents SET meta = ? WHERE id = ?").bind(JSON.stringify({ ...meta, review, warnings: [] }), id),
+    eventStmt(env.DB, "document", id, "reviewed", { kind: doc.kind, verdict: review.verdict }),
+  ]);
+}
+
+/** Metadata after the user edits a generated document: fabrication checks re-run and the review is marked stale. */
+export async function metaAfterEdit(env: Env, doc: Document, content: string): Promise<DocumentMeta> {
+  const { parentContent: _omit, ...meta } = doc.meta;
+  const profile = await getProfile(env.DB);
+  const [knowledge, master, job] = await Promise.all([
+    loadKnowledge(env.DB, profile),
+    doc.parentId ? getDocument(env.DB, doc.parentId) : Promise.resolve(null),
+    doc.jobId ? env.DB.prepare("SELECT description FROM jobs WHERE id = ?").bind(doc.jobId).first<{ description: string }>() : Promise.resolve(null),
+  ]);
+  const source = master ?? knowledge.master;
+  const review = meta.review ? { review: { ...meta.review, stale: true } } : {};
+  if (!source) return { ...meta, ...review, warnings: [] };
+
+  const evidence = [evidenceText(knowledge), documentText(source.content), meta.angle ?? ""].join("\n");
+  const checks = verifyGenerated(documentText(content), { evidence, context: job?.description ?? "" });
+  if (doc.kind !== "tailored_cv") return { ...meta, ...review, warnings: checks };
   const unreadable = isLatexCv(content) && !parseLatexCv(content) ? ["This LaTeX couldn't be read. Check for unbalanced braces."] : [];
-  return [...unreadable, ...missingContactDetails(headerText(content), headerText(masterCv.content)), ...checks];
+  return { ...meta, ...review, warnings: [...unreadable, ...missingContactDetails(headerText(content), headerText(source.content)), ...checks] };
 }

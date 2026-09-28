@@ -49,7 +49,8 @@ Module boundaries follow the product workflow:
   `hydrate()` and `resolveName()`. The orchestrator filters relevant internships, dedupes, scores and stores.
 - **Parsing** (`worker/lib/text.ts`): HTML to Markdown, workplace, deadline and duration detection, fingerprints.
 - **Matching** (`worker/matching`): deterministic scoring for every job, plus verification of generated text.
-- **Document generation** (`worker/documents`, `worker/ai`): fit analysis, tailored CV, cover letter, answers.
+- **Personalization** (`worker/personalization`): career knowledge base, job insights (requirement → evidence map, strategy, cited company research), claim validation. See [personalization.md](personalization.md).
+- **Document generation** (`worker/documents`, `worker/ai`): tailored CV, cover letter, answers, quality review.
 - **Application tracking** (`worker/routes/applications.ts`): pipeline state, apply kit, explicit submission confirmation.
 - **Audit trail** (`events` table): every discovery, analysis, generated document and status change.
 
@@ -65,7 +66,8 @@ Every job gets an explainable 0–100 score without calling a model:
 | Eligibility | 20% | Penalties for PhD-only, master's-only, clearance, citizenship, sponsorship (when needed) and graduation-year mismatches. |
 
 Include keywords add up to 8 points; an exclude keyword caps the score at 15.
-On demand, **Analyze Fit** asks the model for a written assessment grounded in the CV.
+The score only ranks the inbox. Applications are built on **job insights**: what the posting evaluates, the candidate's
+evidence per requirement and a tailoring strategy ([personalization.md](personalization.md)).
 
 ### CV template
 
@@ -74,17 +76,21 @@ Tailored CVs always use the résumé LaTeX template in [`shared/cvTemplate.ts`](
 with those macros into a structured document (header, entries, items, skill lines), and renders structured documents back to LaTeX,
 HTML (preview and print) and plain text (matching, diffs, checks).
 
-When the master CV is LaTeX, the model only returns *choices*: which entries to include and in what order, reworded bullets, and the order
-of existing skills. `applyTailoring()` applies them to the master, so the header, section titles, organizations, roles, dates, locations and
-headings are copied verbatim, unknown entries are ignored, skills not in the master are dropped, and bullet counts can't grow. Masters that
-aren't LaTeX (PDF, DOCX, Markdown) are rebuilt into the same template structure from their text, with a warning to upload the `.tex`.
+When the master CV is LaTeX, the model only returns *choices*: which entries to include and in what order, reworded bullets with the evidence
+each uses, and the order of existing skills. Each bullet is validated against its own entry's evidence, then `applyTailoring()` applies the
+choices to the master, so the header, section titles, organizations, roles, dates, locations and headings are copied verbatim, unknown entries
+are ignored, skills not in the master are dropped, and bullet counts can't grow. Masters that aren't LaTeX (PDF, DOCX, Markdown) are rebuilt
+into the same template structure from their text, with a warning to upload the `.tex`.
 
 ### Preventing fabrication
 
-1. Every prompt includes strict grounding rules: only facts from the master CV and profile, no new metrics or technologies, no inflated scope.
-2. Structured output schemas force the model to list its changes (tailored CV) or its evidence for each claim (cover letter, answers).
-3. `verifyGenerated()` scans each draft for skills and figures that don't appear in the candidate's material and shows them as warnings. It runs again after every edit.
-4. Drafts must be approved by the user. The untouched model output is kept in `generated_content` for auditing.
+1. Every claim traces to an evidence id in the knowledge base (master CV, knowledge notes, profile). Prompts carry strict grounding rules.
+2. Deterministic validation rejects bullet rewrites that add technologies, figures or scope their entry's evidence doesn't show, or that use another entry's evidence; the original bullet is kept.
+3. Requirement matches without evidence become gaps; company facts need a cited public source.
+4. A quality review (deterministic checks plus a reviewer model) runs before a draft is shown; a draft that fails is regenerated once. Exports and approval ask first when a document is unreviewed, edited since review, or needs work.
+5. Drafts must be approved by the user. The untouched model output is kept in `generated_content` for auditing.
+
+Details: [personalization.md](personalization.md).
 
 ### Duplicates
 
@@ -120,7 +126,9 @@ erDiagram
 | --- | --- |
 | `profile` | Single row: contact details, education, skills, target roles, location and keyword preferences. |
 | `sources` | Company boards and aggregator categories, with last run status. |
-| `jobs` | Normalized postings: description (Markdown), extracted skills, deadline, fingerprint, match score and detail, AI analysis. |
+| `jobs` | Normalized postings: description (Markdown), extracted skills, deadline, fingerprint, match score and detail. |
+| `job_insights` | Per job: requirements, requirement → evidence map, strategy and cited company research, with a hash of their inputs. |
+| `knowledge_notes` | The candidate's additions to the knowledge base: details behind CV entries, projects, hackathons, open source, motivation. |
 | `applications` | One per tracked job: status, priority, notes, chosen CV and cover letter, checklist, applied date. |
 | `documents` | Master CVs (one active), tailored CVs, cover letters, answers. Draft or approved; keeps generated content and warnings. |
 | `events` | Append-only audit log. |
@@ -183,6 +191,7 @@ Optional hardening: put the app behind **Cloudflare Access** in addition to the 
 │   ├── documents/         Analysis and document generation
 │   ├── lib/               Auth, D1 helpers, HTTP, text parsing, validation
 │   ├── matching/          Scoring and fabrication checks
+│   ├── personalization/   Knowledge base, job insights, claim validation
 │   ├── routes/            API routes by resource
 │   └── notifications.ts   Notification helpers and deadline reminders
 ├── src/                   React app: components, pages, styles, API client

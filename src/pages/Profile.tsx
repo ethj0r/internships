@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { documentText } from "../../shared/cv";
 import { ROLES } from "../../shared/roles";
+import { SEARCH_SCOPE_LABELS } from "../../shared/regions";
 import { extractSkills, sameSkill } from "../../shared/skills";
-import type { Profile, RemotePreference } from "../../shared/types";
+import { SEARCH_SCOPES, type Profile, type RemotePreference, type SearchScope } from "../../shared/types";
 import { ErrorState, Field, Loading, Segmented, TokenInput } from "../components/common";
 import { Icon, Spinner } from "../components/Icon";
 import { useToast } from "../components/Toast";
@@ -16,6 +17,12 @@ export function ProfilePage() {
   if (!profile) return <div className="page">{loading ? <Loading /> : error && <ErrorState error={error} onRetry={() => void reload()} />}</div>;
   return <ProfileForm key={profile.updatedAt} profile={profile} onSaved={mutate} />;
 }
+
+const SCOPE_HINTS: Record<SearchScope, string> = {
+  indonesia_remote: "Internships anywhere in Indonesia, on-site or not, plus remote internships you can do from Indonesia.",
+  asia: "Also on-site and hybrid internships elsewhere in East and Southeast Asia, like Singapore, Tokyo or Taipei.",
+  anywhere: "Every location. Preferred locations and workplace decide how location affects the match score.",
+};
 
 function toInput(p: Profile): ProfileInput {
   const { updatedAt: _ignored, ...rest } = p;
@@ -201,6 +208,16 @@ function ProfileForm({ profile, onSaved }: { profile: Profile; onSaved: (p: Prof
               </div>
             </div>
             <div className="field">
+              <span className="field-label">Search area</span>
+              <Segmented<SearchScope>
+                label="Search area"
+                value={form.searchScope}
+                onChange={(v) => set("searchScope", v)}
+                options={SEARCH_SCOPES.map((s) => ({ value: s, label: SEARCH_SCOPE_LABELS[s] }))}
+              />
+              <p className="field-hint">{SCOPE_HINTS[form.searchScope]}</p>
+            </div>
+            <div className="field">
               <span className="field-label">Workplace</span>
               <Segmented<RemotePreference>
                 label="Workplace preference"
@@ -214,7 +231,7 @@ function ProfileForm({ profile, onSaved }: { profile: Profile; onSaved: (p: Prof
                 ]}
               />
             </div>
-            <Field label="Preferred locations" htmlFor="p-locations" hint="Cities or countries as they appear in postings, e.g. London, New York, Germany">
+            <Field label="Preferred locations" htmlFor="p-locations" hint="Cities or countries as they appear in postings, e.g. Jakarta, Bandung, Singapore">
               <TokenInput id="p-locations" value={form.preferredLocations} onChange={(v) => set("preferredLocations", v)} placeholder="Add a location" />
             </Field>
             <div className="fields">

@@ -57,7 +57,11 @@ export const SOURCE_LABELS: Record<SourceKind, string> = {
   greenhouse: "Greenhouse",
   lever: "Lever",
   ashby: "Ashby",
+  smartrecruiters: "SmartRecruiters",
+  workable: "Workable",
+  catapa: "CATAPA",
   themuse: "The Muse",
+  himalayas: "Himalayas",
   manual: "Added by you",
 };
 

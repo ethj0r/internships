@@ -28,9 +28,10 @@ export function Discover() {
   const view = (params.get("view") as View) || "inbox";
   const sort = (params.get("sort") as Sort) || (view === "inbox" ? "score" : "newest");
   const workplace = params.get("workplace") ?? "";
+  const region = (params.get("region") as JobQuery["region"]) || undefined;
   const minScore = Number(params.get("minScore") ?? 0);
 
-  const query: JobQuery = { view, sort, q, workplace: workplace || undefined, minScore: minScore || undefined, limit: 200 };
+  const query: JobQuery = { view, sort, q, workplace: workplace || undefined, region, minScore: minScore || undefined, limit: 200 };
   const key = `jobs:${JSON.stringify(query)}`;
   const { data, error, loading, reload } = useResource(key, () => api.jobs(query));
   const { data: overview } = useResource("overview", api.overview);
@@ -66,7 +67,7 @@ export function Discover() {
     navigate(next && next.id !== selectedId ? `/discover/${next.id}${listSearch}` : `/discover${listSearch}`, { replace: true });
   };
 
-  const filtersActive = Boolean(workplace || minScore);
+  const filtersActive = Boolean(workplace || region || minScore);
 
   return (
     <div className="split" data-detail={selectedId !== null}>
@@ -91,6 +92,9 @@ export function Discover() {
                 { key: "remote", label: "Remote", checked: workplace === "remote", onSelect: () => setParam("workplace", "remote") },
                 { key: "hybrid", label: "Hybrid", checked: workplace === "hybrid", onSelect: () => setParam("workplace", "hybrid") },
                 { key: "onsite", label: "On-site", checked: workplace === "onsite", onSelect: () => setParam("workplace", "onsite") },
+                { key: "area", label: "Whole Search Area", checked: !region, separatorBefore: true, onSelect: () => setParam("region", null) },
+                { key: "indonesia", label: "Indonesia", checked: region === "indonesia", onSelect: () => setParam("region", "indonesia") },
+                { key: "asia", label: "Elsewhere in Asia", checked: region === "asia", onSelect: () => setParam("region", "asia") },
                 { key: "m0", label: "Any Match", checked: !minScore, separatorBefore: true, onSelect: () => setParam("minScore", null) },
                 { key: "m50", label: "50% Match or Higher", checked: minScore === 50, onSelect: () => setParam("minScore", "50") },
                 { key: "m75", label: "75% Match or Higher", checked: minScore === 75, onSelect: () => setParam("minScore", "75") },

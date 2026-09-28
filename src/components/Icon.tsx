@@ -138,6 +138,7 @@ const PATHS: Record<string, ReactNode> = {
   ),
   paperplane: <path d="M20.5 3.5 10 14M20.5 3.5 14 20.5l-4-6.5-6.5-4Z" />,
   checklist: <path d="M4 6.5 5.5 8 8 5M4 12.5 5.5 14 8 11M4 18.5 5.5 20 8 17M11.5 6.5H20M11.5 12.5H20M11.5 18.5H20" />,
+  book: <path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H19v14.5H7.5A2.5 2.5 0 0 0 5 20M5 5.5V20M5 20a1 1 0 0 0 1 1h13v-3.5M9 7.5h6" />,
 };
 
 export type IconName = keyof typeof PATHS;

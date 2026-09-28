@@ -1,11 +1,12 @@
 // Discovery orchestration: fetch sources → filter relevant internships → normalize → dedupe → score → store → notify.
 
 import { documentText } from "../../shared/cv";
+import { classifyRegion, inSearchScope } from "../../shared/regions";
 import { isRelevantInternship } from "../../shared/roles";
 import type { DiscoveryRun, JobSkills, SourceKind, Workplace } from "../../shared/types";
 import { chunk, eventStmt, getActiveMasterCv, getProfile, nowIso, parseJson, placeholders } from "../lib/db";
 import { detectWorkplace, htmlToMarkdown, jobFingerprint, parseDeadline, parseDuration, plainText, plainTextToMarkdown } from "../lib/text";
-import { buildMatchContext, extractJobSkills, scoreJob, type MatchContext } from "../matching/score";
+import { buildMatchContext, extractJobSkills, MATCH_VERSION, scoreJob, type MatchContext } from "../matching/score";
 import { notificationStmt } from "../notifications";
 import { adapterFor } from "./registry";
 import type { RawJob, SourceRef } from "./types";
@@ -43,8 +44,9 @@ export async function ingestJob(db: D1Database, kind: SourceKind, sourceId: numb
   const text = plainText(description);
   const skills = extractJobSkills(description);
   const workplace = detectWorkplace(raw.location, raw.title, text, raw.workplaceHint);
+  const region = classifyRegion({ location: raw.location, workplace, description: text });
   const fingerprint = await jobFingerprint(raw.company, raw.title, raw.location);
-  const match = scoreJob({ title: raw.title, description: text, location: raw.location, workplace, skills }, ctx);
+  const match = scoreJob({ title: raw.title, description: text, location: raw.location, workplace, region, skills }, ctx);
 
   const duplicate = await db
     .prepare("SELECT id FROM jobs WHERE fingerprint = ? AND duplicate_of IS NULL ORDER BY id LIMIT 1")
@@ -53,10 +55,10 @@ export async function ingestJob(db: D1Database, kind: SourceKind, sourceId: numb
 
   const inserted = await db
     .prepare(
-      `INSERT INTO jobs (source_id, source_kind, external_id, company, title, location, workplace, department, employment_type,
+      `INSERT INTO jobs (source_id, source_kind, external_id, company, title, location, workplace, region, department, employment_type,
          duration, url, apply_url, description, skills, posted_at, deadline, fingerprint, duplicate_of, match_score, match_detail,
          first_seen_at, last_seen_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (source_kind, external_id) DO NOTHING
        RETURNING id`,
     )
@@ -68,6 +70,7 @@ export async function ingestJob(db: D1Database, kind: SourceKind, sourceId: numb
       raw.title,
       raw.location,
       workplace,
+      region,
       raw.department ?? "",
       raw.employmentType ?? "",
       parseDuration(raw.title, text),
@@ -93,7 +96,7 @@ export async function ingestJob(db: D1Database, kind: SourceKind, sourceId: numb
   }
 
   const stmts = [eventStmt(db, "job", inserted.id, "discovered", { source: kind, score: match.score, duplicateOf: duplicate?.id ?? null })];
-  if (!duplicate && match.score >= ctx.profile.notifyMinScore) {
+  if (!duplicate && inSearchScope(region, ctx.profile.searchScope) && match.score >= ctx.profile.notifyMinScore) {
     stmts.push(
       notificationStmt(db, "new_match", `${raw.company}: ${raw.title}`, `${match.score}% match${raw.location ? `, ${raw.location}` : ""}`, inserted.id, `new_match:${inserted.id}`),
     );
@@ -136,8 +139,13 @@ async function discoverSource(db: D1Database, source: SourceRef, ctx: MatchConte
       .run();
   }
 
+  // New postings outside the search area aren't stored. Known ones were still marked seen above, so they don't close.
+  const inArea = relevant.filter((j) =>
+    inSearchScope(classifyRegion({ location: j.location, workplace: detectWorkplace(j.location, j.title, "", j.workplaceHint) }), ctx.profile.searchScope),
+  );
+
   let created = 0;
-  for (let job of relevant) {
+  for (let job of inArea) {
     if (known.has(job.externalId)) continue;
     if (adapter.hydrate && !job.descriptionHtml && !job.descriptionText) {
       // Out of detail budget: leave it for the next run rather than storing it without a description.
@@ -152,7 +160,7 @@ async function discoverSource(db: D1Database, source: SourceRef, ctx: MatchConte
     const result = await ingestJob(db, source.kind, source.id, job, ctx);
     if (result.created) created++;
   }
-  return { seen: relevant.length, created };
+  return { seen: inArea.length, created };
 }
 
 function intVar(value: string | undefined, fallback: number, min: number, max: number): number {
@@ -179,6 +187,8 @@ export async function runDiscovery(env: Env, opts: { trigger: "cron" | "manual";
           .all<SourceRef>()
       ).results;
 
+  // After a deploy that changes scoring, jobs scored by the older version are brought up to date first.
+  await rescoreAll(env, { staleOnly: true });
   const ctx = await loadMatchContext(db);
   let detailBudget = intVar(env.DISCOVERY_MAX_DETAIL_FETCHES, 25, 0, 500);
   const takeDetailBudget = () => detailBudget-- > 0;
@@ -217,19 +227,32 @@ export async function runDiscovery(env: Env, opts: { trigger: "cron" | "manual";
   return { id: run.id, trigger: opts.trigger, startedAt: run.started_at, finishedAt, sourcesChecked: sources.length, jobsSeen, jobsNew, errors };
 }
 
-/** Recomputes match scores after the profile or master CV changes. */
-export async function rescoreAll(env: Env): Promise<number> {
-  const ctx = await loadMatchContext(env.DB);
-  const { results } = await env.DB.prepare(
-    "SELECT id, title, description, location, workplace, skills FROM jobs WHERE closed_at IS NULL OR id IN (SELECT job_id FROM applications)",
-  ).all<{ id: number; title: string; description: string; location: string; workplace: Workplace; skills: string }>();
+/** Recomputes regions and match scores after the profile or master CV changes. `staleOnly`: only jobs scored by an older MATCH_VERSION. */
+export async function rescoreAll(env: Env, opts: { staleOnly?: boolean } = {}): Promise<number> {
+  const query = env.DB.prepare(
+    `SELECT id, title, description, location, workplace, skills FROM jobs
+     WHERE (closed_at IS NULL OR id IN (SELECT job_id FROM applications))
+     ${opts.staleOnly ? "AND IFNULL(json_extract(match_detail, '$.version'), 0) < ?" : ""}`,
+  );
+  const { results } = await (opts.staleOnly ? query.bind(MATCH_VERSION) : query).all<{
+    id: number;
+    title: string;
+    description: string;
+    location: string;
+    workplace: Workplace;
+    skills: string;
+  }>();
+  if (!results.length) return 0;
 
+  const ctx = await loadMatchContext(env.DB);
   const updates = results.map((r) => {
+    const description = plainText(r.description);
+    const region = classifyRegion({ location: r.location, workplace: r.workplace, description });
     const match = scoreJob(
-      { title: r.title, description: plainText(r.description), location: r.location, workplace: r.workplace, skills: parseJson<JobSkills>(r.skills, { required: [], preferred: [] }) },
+      { title: r.title, description, location: r.location, workplace: r.workplace, region, skills: parseJson<JobSkills>(r.skills, { required: [], preferred: [] }) },
       ctx,
     );
-    return env.DB.prepare("UPDATE jobs SET match_score = ?, match_detail = ? WHERE id = ?").bind(match.score, JSON.stringify(match), r.id);
+    return env.DB.prepare("UPDATE jobs SET region = ?, match_score = ?, match_detail = ? WHERE id = ?").bind(region, match.score, JSON.stringify(match), r.id);
   });
   for (const group of chunk(updates, 50)) await env.DB.batch(group);
   return updates.length;

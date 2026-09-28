@@ -1,5 +1,18 @@
 // Types shared by the Worker API and the web client.
 
+import type {
+  BulletChange,
+  CompanyFact,
+  EvidenceItem,
+  JobInsights,
+  JobRequirement,
+  LetterPlan,
+  OmittedEntry,
+  QualityReview,
+  RequirementMatch,
+  TailoringStrategy,
+} from "./personalization";
+
 export const APPLICATION_STATUSES = [
   "discovered",
   "interested",
@@ -27,8 +40,15 @@ export const PRIORITIES = ["low", "medium", "high"] as const;
 export type Priority = (typeof PRIORITIES)[number];
 
 export type Workplace = "remote" | "hybrid" | "onsite" | "unknown";
-export const SOURCE_KINDS = ["greenhouse", "lever", "ashby", "themuse", "manual"] as const;
+export const SOURCE_KINDS = ["greenhouse", "lever", "ashby", "smartrecruiters", "workable", "catapa", "themuse", "himalayas", "manual"] as const;
 export type SourceKind = (typeof SOURCE_KINDS)[number];
+
+/** Where a job can be worked from, for a candidate in Indonesia (shared/regions.ts). */
+export const REGIONS = ["indonesia", "remote_open", "remote_asia", "remote_unknown", "asia", "other", "unknown"] as const;
+export type Region = (typeof REGIONS)[number];
+/** Which regions discovery keeps and lists: Indonesia and remote roles, also on-site in Asia, or anywhere. */
+export const SEARCH_SCOPES = ["indonesia_remote", "asia", "anywhere"] as const;
+export type SearchScope = (typeof SEARCH_SCOPES)[number];
 export type DocumentKind = "master_cv" | "tailored_cv" | "cover_letter" | "answers";
 export type RemotePreference = "any" | "remote" | "hybrid" | "onsite";
 
@@ -49,16 +69,6 @@ export interface MatchResult {
   breakdown: { skills: number; role: number; location: number; eligibility: number };
 }
 
-export interface FitAnalysis {
-  summary: string;
-  strengths: string[];
-  gaps: string[];
-  concerns: string[];
-  keyQualifications: string[];
-  talkingPoints: string[];
-  generator: string;
-}
-
 export interface Profile {
   fullName: string;
   email: string;
@@ -72,6 +82,7 @@ export interface Profile {
   targetRoles: string[];
   preferredLocations: string[];
   remotePreference: RemotePreference;
+  searchScope: SearchScope;
   workAuthorization: string;
   keywordsInclude: string[];
   keywordsExclude: string[];
@@ -91,6 +102,7 @@ export interface JobSummary {
   title: string;
   location: string;
   workplace: Workplace;
+  region: Region;
   sourceKind: SourceKind;
   url: string;
   postedAt: string | null;
@@ -111,8 +123,10 @@ export interface JobDetail extends JobSummary {
   description: string;
   skills: JobSkills;
   matchDetail: MatchResult | null;
-  aiAnalysis: FitAnalysis | null;
-  aiAnalyzedAt: string | null;
+  /** Requirement → evidence analysis and tailoring strategy (shared/personalization.ts). */
+  insights: JobInsights | null;
+  /** The posting, master CV, knowledge notes or profile changed since the insights were built. */
+  insightsStale: boolean;
   sourceName: string | null;
   lastSeenAt: string;
   duplicates: JobSummary[];
@@ -156,6 +170,19 @@ export interface DocumentMeta {
   grounding?: Grounding[];
   questions?: string[];
   parentContent?: string;
+  // Personalization (tailored CVs and cover letters)
+  strategy?: TailoringStrategy;
+  requirements?: JobRequirement[];
+  matches?: RequirementMatch[];
+  /** Evidence the document and its requirement map cite. */
+  evidence?: EvidenceItem[];
+  bulletChanges?: BulletChange[];
+  omitted?: OmittedEntry[];
+  plan?: LetterPlan;
+  companyFacts?: CompanyFact[];
+  /** What the candidate asked a cover letter to reflect. */
+  angle?: string;
+  review?: QualityReview;
 }
 
 export interface DocumentSummary {

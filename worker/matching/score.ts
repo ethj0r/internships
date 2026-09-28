@@ -1,12 +1,14 @@
 // Deterministic, explainable match scoring. Runs for every discovered job, so it must stay cheap.
-// The optional AI fit analysis (ai/analyze) adds narrative on top of this, on demand.
+// It ranks the inbox only; applications are built on the evidence-based insights in worker/personalization.
 
+import { classifyRegion } from "../../shared/regions";
 import { detectRoles, ROLE_LABELS } from "../../shared/roles";
 import { extractSkills, skillSet } from "../../shared/skills";
-import type { JobSkills, MatchResult, Profile, Workplace } from "../../shared/types";
+import type { JobSkills, MatchResult, Profile, Region, Workplace } from "../../shared/types";
 import { normalizeKey } from "../lib/text";
 
-export const MATCH_VERSION = 1;
+// Bumped when scoring changes; the next discovery run re-scores jobs from older versions.
+export const MATCH_VERSION = 2;
 
 export interface MatchContext {
   profile: Profile;
@@ -61,6 +63,8 @@ export interface MatchInput {
   description: string; // plain text
   location: string;
   workplace: Workplace;
+  /** Classified from location and description when omitted. */
+  region?: Region;
   skills: JobSkills;
 }
 
@@ -71,6 +75,34 @@ interface Signals {
 }
 
 function locationFit(job: MatchInput, profile: Profile): Signals {
+  if (profile.searchScope === "anywhere") return preferenceFit(job, profile);
+  const hit = profile.preferredLocations.find((l) => normalizeKey(l) && normalizeKey(job.location).includes(normalizeKey(l)));
+  const located = hit ? [`Located in ${hit}`] : [];
+  const arrangement = job.workplace === "hybrid" ? "Hybrid" : "On-site";
+
+  switch (job.region ?? classifyRegion(job)) {
+    case "indonesia":
+      if (job.workplace === "remote") return { score: 1, highlights: ["Remote from Indonesia"], concerns: [] };
+      return profile.remotePreference === "remote"
+        ? { score: 0.8, highlights: hit ? located : ["In Indonesia"], concerns: [`${arrangement} role; you prefer remote`] }
+        : { score: 1, highlights: hit ? located : ["In Indonesia"], concerns: [] };
+    case "remote_open":
+      return { score: 1, highlights: ["Remote, open to Indonesia"], concerns: [] };
+    case "remote_asia":
+      return { score: 0.75, highlights: ["Remote"], concerns: [`Listed for ${job.location.replace(/^remote[\s,:–-]*/i, "")}; check that they hire from Indonesia`] };
+    case "remote_unknown":
+      return { score: 0.6, highlights: ["Remote"], concerns: ["Doesn't say which countries it hires from"] };
+    case "asia":
+      return { score: hit ? 0.9 : 0.45, highlights: located, concerns: [`${arrangement} in ${job.location}; needs relocation and a work visa`] };
+    case "unknown":
+      return { score: 0.5, highlights: [], concerns: ["Location not listed"] };
+    default:
+      return { score: 0.15, highlights: [], concerns: [`${job.location} is outside your search area`] };
+  }
+}
+
+/** Search area "Anywhere": preferred locations and workplace preference decide location fit. */
+function preferenceFit(job: MatchInput, profile: Profile): Signals {
   const locations = profile.preferredLocations.map(normalizeKey).filter(Boolean);
   const jobLocation = normalizeKey(job.location);
   const hit = profile.preferredLocations.find((l) => normalizeKey(l) && jobLocation.includes(normalizeKey(l)));

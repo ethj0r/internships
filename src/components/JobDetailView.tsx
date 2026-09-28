@@ -8,11 +8,19 @@ import { invalidate, useAction, useResource } from "../lib/hooks";
 import { ErrorState, Loading, Markdown, MatchRing } from "./common";
 import { Icon, Spinner } from "./Icon";
 import { MenuButton } from "./Menu";
+import { InsightsView } from "./Personalization";
 import { Sheet } from "./Sheet";
 import { invalidateTracking, StatusMenu } from "./StatusMenu";
 import { useToast } from "./Toast";
 
-type Generating = DocumentKind | "analysis" | null;
+type Generating = DocumentKind | "insights" | null;
+
+const GENERATING_LABELS: Record<DocumentKind, string> = {
+  master_cv: "",
+  tailored_cv: "Tailoring your CV from your evidence, then reviewing the draft against the role. If the role hasn't been analyzed yet, that happens first. This can take a few minutes.",
+  cover_letter: "Planning the letter around the role and your evidence, writing it, then reviewing it. This can take a few minutes.",
+  answers: "Drafting answers from your strongest evidence for this role. This can take a minute.",
+};
 
 const PRIORITY_LABELS: Record<Priority, string> = { low: "Low Priority", medium: "Normal Priority", high: "High Priority" };
 
@@ -34,7 +42,7 @@ export function JobDetailView({
   const toast = useToast();
   const navigate = useNavigate();
   const [generating, setGenerating] = useState<Generating>(null);
-  const [sheet, setSheet] = useState<"deadline" | "untrack" | "answers" | null>(null);
+  const [sheet, setSheet] = useState<"deadline" | "untrack" | "answers" | "cover_letter" | null>(null);
 
   const [track, tracking] = useAction(async () => {
     const app = await api.track(jobId);
@@ -66,16 +74,17 @@ export function JobDetailView({
     toast.show("Stopped tracking");
   }, toast.error);
 
-  async function generate(kind: Exclude<Generating, null>, questions?: string[]) {
+  async function generate(kind: Exclude<Generating, null>, options: { questions?: string[]; angle?: string } = {}) {
     if (!job) return;
     setGenerating(kind);
     try {
-      if (kind === "analysis") {
-        const analysis = await api.analyzeJob(jobId);
-        mutate({ ...job, aiAnalysis: analysis, aiAnalyzedAt: new Date().toISOString() });
+      if (kind === "insights") {
+        const insights = await api.analyzeRole(jobId);
+        mutate({ ...job, insights, insightsStale: false });
         invalidate("events");
       } else {
-        const doc = kind === "tailored_cv" ? await api.tailorCv(jobId) : kind === "cover_letter" ? await api.coverLetter(jobId) : await api.answers(jobId, questions);
+        const doc =
+          kind === "tailored_cv" ? await api.tailorCv(jobId) : kind === "cover_letter" ? await api.coverLetter(jobId, options.angle) : await api.answers(jobId, options.questions);
         invalidateTracking(jobId);
         invalidate("documents");
         navigate(`/documents/${doc.id}`);
@@ -223,26 +232,26 @@ export function JobDetailView({
 
           <section className="section">
             <div className="section-header">
-              <h2 className="section-title">Fit Analysis</h2>
-              {job.aiAnalysis && (
-                <button type="button" className="btn btn-plain btn-sm" disabled={generating !== null} onClick={() => void generate("analysis")}>
+              <h2 className="section-title">Application Strategy</h2>
+              {job.insights && (
+                <button type="button" className="btn btn-plain btn-sm" disabled={generating !== null} onClick={() => void generate("insights")}>
                   Analyze Again
                 </button>
               )}
             </div>
-            {generating === "analysis" ? (
-              <Progress label="Comparing the posting with your CV. This usually takes under a minute." />
-            ) : job.aiAnalysis ? (
-              <AnalysisView job={job} />
+            {generating === "insights" ? (
+              <Progress label="Reading what the posting is really evaluating, researching the company and mapping your evidence to each requirement. This can take a couple of minutes." />
+            ) : job.insights ? (
+              <InsightsView insights={job.insights} stale={job.insightsStale} disabled={generating !== null} onRefresh={() => void generate("insights")} />
             ) : (
               <div className="group row">
                 <div className="row-main">
-                  <p className="row-title">Get a written assessment</p>
-                  <p className="row-subtitle">Strengths, gaps and what to emphasize, based on your CV.</p>
+                  <p className="row-title">Understand the role before you apply</p>
+                  <p className="row-subtitle">What the employer is really evaluating, your evidence for each requirement, honest gaps and a tailoring strategy.</p>
                 </div>
                 {canGenerate ? (
-                  <button type="button" className="btn" disabled={generating !== null} onClick={() => void generate("analysis")}>
-                    Analyze Fit
+                  <button type="button" className="btn" disabled={generating !== null} onClick={() => void generate("insights")}>
+                    Analyze Role
                   </button>
                 ) : (
                   <Link className="btn" to="/documents">
@@ -257,9 +266,9 @@ export function JobDetailView({
             <div className="section-header">
               <h2 className="section-title">Application Materials</h2>
             </div>
-            {generating && generating !== "analysis" && (
+            {generating && generating !== "insights" && (
               <div style={{ marginBottom: 12 }}>
-                <Progress label={`Writing your ${KIND_LABELS[generating].toLowerCase()} from your master CV. This can take a minute.`} />
+                <Progress label={GENERATING_LABELS[generating]} />
               </div>
             )}
             <div className="group">
@@ -295,7 +304,7 @@ export function JobDetailView({
                     <Icon name="compose" />
                     Tailor CV
                   </button>
-                  <button type="button" className="btn btn-sm" disabled={generating !== null} onClick={() => void generate("cover_letter")}>
+                  <button type="button" className="btn btn-sm" disabled={generating !== null} onClick={() => setSheet("cover_letter")}>
                     Write Cover Letter
                   </button>
                   <button type="button" className="btn btn-sm" disabled={generating !== null} onClick={() => setSheet("answers")}>
@@ -304,7 +313,9 @@ export function JobDetailView({
                 </div>
               )}
             </div>
-            <p className="section-footer">Drafts only use facts from your master CV and profile. Review and approve them before applying.</p>
+            <p className="section-footer">
+              Drafts only claim what your <Link to="/knowledge">career knowledge</Link> supports, and each one is reviewed before you see it. Approve them before applying.
+            </p>
           </section>
 
           {app && <NotesSection applicationId={app.id} jobId={job.id} />}
@@ -352,7 +363,16 @@ export function JobDetailView({
         onClose={() => setSheet(null)}
         onSubmit={(questions) => {
           setSheet(null);
-          void generate("answers", questions);
+          void generate("answers", { questions });
+        }}
+      />
+      <CoverLetterSheet
+        open={sheet === "cover_letter"}
+        company={job.company}
+        onClose={() => setSheet(null)}
+        onSubmit={(angle) => {
+          setSheet(null);
+          void generate("cover_letter", { angle });
         }}
       />
     </>
@@ -474,40 +494,6 @@ function MatchSection({ job }: { job: JobDetail }) {
   );
 }
 
-function AnalysisView({ job }: { job: JobDetail }) {
-  const a = job.aiAnalysis!;
-  const list = (title: string, items: string[], tone?: "good" | "warn") =>
-    items.length > 0 && (
-      <div>
-        <h3 className="headline" style={{ marginBottom: 8 }}>
-          {title}
-        </h3>
-        <ul className={`bullets${tone ? ` ${tone}` : ""}`}>
-          {items.map((i) => (
-            <li key={i}>{i}</li>
-          ))}
-        </ul>
-      </div>
-    );
-  return (
-    <div className="group group-padded" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <p>{a.summary}</p>
-      <div className="columns-2">
-        {list("Strengths", a.strengths, "good")}
-        {list("Gaps", a.gaps, "warn")}
-      </div>
-      {list("Concerns", a.concerns, "warn")}
-      <div className="columns-2">
-        {list("What the role needs most", a.keyQualifications)}
-        {list("What to emphasize", a.talkingPoints)}
-      </div>
-      <p className="caption muted">
-        {a.generator}, {relativeTime(job.aiAnalyzedAt)}. Check it against the posting.
-      </p>
-    </div>
-  );
-}
-
 function NotesSection({ applicationId, jobId }: { applicationId: number; jobId: number }) {
   const { data: apps } = useResource("applications", () => api.applications());
   const app = apps?.find((a) => a.id === applicationId);
@@ -588,7 +574,7 @@ export function describeJobEvent(entityType: string, action: string, detail: Rec
     case "job.imported":
       return "Added by you";
     case "job.analyzed":
-      return "Fit analyzed";
+      return "Role analyzed against your evidence";
     case "job.dismissed":
       return "Hidden from Discover";
     case "job.restored":
@@ -609,6 +595,8 @@ export function describeJobEvent(entityType: string, action: string, detail: Rec
       return "Cover letter chosen for this application";
     case "document.generated":
       return `${kind} drafted`;
+    case "document.reviewed":
+      return detail.verdict === "ready" ? `${kind} passed its quality review` : `${kind} reviewed, needs work`;
     case "document.approved":
       return `${kind} approved`;
     case "document.unapproved":
@@ -657,6 +645,48 @@ function DeadlineSheet({ open, job, onClose, onSaved }: { open: boolean; job: Jo
         </label>
         <input id="deadline" className="input" type="date" value={value} onChange={(e) => setValue(e.target.value)} data-autofocus />
       </div>
+    </Sheet>
+  );
+}
+
+function CoverLetterSheet({ open, company, onClose, onSubmit }: { open: boolean; company: string; onClose: () => void; onSubmit: (angle?: string) => void }) {
+  const [angle, setAngle] = useState("");
+  return (
+    <Sheet
+      open={open}
+      onClose={onClose}
+      wide
+      title="Write a cover letter"
+      message={`The letter builds on the role analysis and your career knowledge. Optionally, tell it in your own words what genuinely draws you to ${company}: a product you use, a problem you care about, someone you spoke with. It won't invent this for you.`}
+      actions={
+        <>
+          <button type="button" className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              onSubmit(angle.trim() || undefined);
+              setAngle("");
+            }}
+          >
+            Write Cover Letter
+          </button>
+        </>
+      }
+    >
+      <textarea
+        className="textarea"
+        rows={5}
+        maxLength={1000}
+        aria-label={`What draws you to ${company}`}
+        placeholder="e.g. I use their app to pay rent and got curious about how they handle failed transfers."
+        value={angle}
+        onChange={(e) => setAngle(e.target.value)}
+        data-autofocus
+      />
+      <p className="field-hint">Leave it empty and the letter uses the interests and motivation in your knowledge base, or a placeholder for you to fill in.</p>
     </Sheet>
   );
 }

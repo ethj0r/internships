@@ -26,18 +26,27 @@ export function verifyGenerated(generated: string, sources: VerifySources): stri
     );
   }
 
-  const allowed = `${sources.evidence}\n${sources.context ?? ""}`.replace(/,/g, "");
+  for (const raw of unsupportedFigures(generated, `${sources.evidence}\n${sources.context ?? ""}`)) {
+    warnings.push(`The figure “${raw}” doesn't appear in your master CV.`);
+  }
+
+  return warnings.slice(0, 15);
+}
+
+/** Figures (counts, percentages, multipliers) in generated text that the allowed text doesn't contain. */
+export function unsupportedFigures(generated: string, allowedText: string): string[] {
+  const allowed = allowedText.replace(/,/g, "");
   const seen = new Set<string>();
+  const unsupported: string[] = [];
   for (const match of generated.matchAll(NUMBER)) {
     const raw = match[0].trim();
     const digits = raw.replace(/,/g, "").replace(/\s/g, "");
     const core = digits.replace(/[%+xkm]$/i, "");
     if (seen.has(digits) || (core.length < 2 && !/%/.test(digits))) continue;
     seen.add(digits);
-    if (!allowed.includes(core)) warnings.push(`The figure “${raw}” doesn't appear in your master CV.`);
+    if (!allowed.includes(core)) unsupported.push(raw);
   }
-
-  return warnings.slice(0, 15);
+  return unsupported;
 }
 
 /** A tailored CV must keep the contact details from the master CV. */

@@ -40,6 +40,12 @@ export function PrintDocument() {
           <span>This is still a draft. Approve it before you send it.</span>
         </div>
       )}
+      {doc.meta.review && (doc.meta.review.stale || doc.meta.review.verdict === "needs_work") && (
+        <div className="notice notice-warning print-toolbar" style={{ justifyContent: "flex-start" }}>
+          <Icon name="warning" />
+          <span>{doc.meta.review.stale ? "You've edited this since its last quality review." : "Its last quality review found issues."} Check it before sending.</span>
+        </div>
+      )}
       {cv ? (
         <div className="cv-sheet">
           <CvPreview doc={cv} />

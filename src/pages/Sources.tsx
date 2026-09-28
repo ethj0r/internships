@@ -11,11 +11,17 @@ import { invalidate, useAction, useDocumentTitle, useResource } from "../lib/hoo
 type AddableKind = Exclude<SourceKind, "manual">;
 
 const PLACEHOLDERS: Record<AddableKind, string> = {
-  greenhouse: "Board name or URL, e.g. stripe",
-  lever: "Company name or URL, e.g. palantir",
-  ashby: "Board name or URL, e.g. notion",
+  greenhouse: "Board name or URL, e.g. xendit",
+  lever: "Company name or URL, e.g. animocabrands",
+  ashby: "Board name or URL, e.g. coinhako",
+  smartrecruiters: "Company ID or URL, e.g. Grab",
+  workable: "Account or URL, e.g. mercari",
+  catapa: "Company or URL, e.g. gdplabs",
   themuse: "Category, e.g. Software Engineering",
+  himalayas: "Country, e.g. Singapore",
 };
+
+const JOB_BOARDS: SourceKind[] = ["themuse", "himalayas"];
 
 export function Sources() {
   const { data: sources, error, loading, reload } = useResource("sources", api.sources);
@@ -54,8 +60,8 @@ export function Sources() {
   const visible = sources.filter((s) => s.kind !== "manual");
   const enabled = visible.filter((s) => s.enabled).length;
   const groups: { title: string; items: Source[] }[] = [
-    { title: "Company Career Boards", items: visible.filter((s) => s.kind !== "themuse") },
-    { title: "Job Boards", items: visible.filter((s) => s.kind === "themuse") },
+    { title: "Company Career Boards", items: visible.filter((s) => !JOB_BOARDS.includes(s.kind)) },
+    { title: "Job Boards", items: visible.filter((s) => JOB_BOARDS.includes(s.kind)) },
   ];
 
   return (
@@ -115,8 +121,8 @@ export function Sources() {
             ),
         )}
         <p className="section-footer" style={{ marginTop: 12 }}>
-          Sources use each platform's official public job-board API. LinkedIn, Indeed and Handshake don't offer one and don't allow automated collection. Add roles from
-          those sites with the + button in Discover.
+          Sources read each platform's public job feed. LinkedIn, JobStreet, Glints, Kalibrr and Indeed don't offer one and don't allow automated collection. Add
+          roles from those sites with the + button in Discover.
         </p>
 
         {runs && runs.length > 0 && (
@@ -179,10 +185,14 @@ function AddSourceForm() {
               <option value="greenhouse">Greenhouse</option>
               <option value="lever">Lever</option>
               <option value="ashby">Ashby</option>
+              <option value="smartrecruiters">SmartRecruiters</option>
+              <option value="workable">Workable</option>
+              <option value="catapa">CATAPA</option>
               <option value="themuse">The Muse</option>
+              <option value="himalayas">Himalayas (remote)</option>
             </select>
           </Field>
-          <Field label={kind === "themuse" ? "Category" : "Company board"} htmlFor="source-id" className="spacer">
+          <Field label={kind === "themuse" ? "Category" : kind === "himalayas" ? "Country" : "Company board"} htmlFor="source-id" className="spacer">
             <input id="source-id" className="input" placeholder={PLACEHOLDERS[kind]} value={identifier} onChange={(e) => setIdentifier(e.target.value)} />
           </Field>
           <button type="submit" className="btn btn-primary" disabled={!identifier.trim() || pending}>
@@ -196,7 +206,10 @@ function AddSourceForm() {
           </p>
         )}
       </form>
-      <p className="section-footer">Find a company's board name in its careers page links, like boards.greenhouse.io/stripe or jobs.lever.co/palantir.</p>
+      <p className="section-footer">
+        Find a company's board name in its careers page links, like boards.greenhouse.io/xendit, jobs.smartrecruiters.com/Grab or career.catapa.com/gdplabs. Himalayas
+        lists remote internships open to the country you enter.
+      </p>
     </section>
   );
 }

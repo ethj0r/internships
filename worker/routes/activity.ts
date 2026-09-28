@@ -3,6 +3,7 @@ import { z } from "zod";
 import { APPLICATION_STATUSES, type ApplicationStatus, type AuditEvent, type Notification, type Overview } from "../../shared/types";
 import { aiProviderName } from "../ai/provider";
 import { getActiveMasterCv, getProfile, JOB_SUMMARY_SELECT, nowIso, parseJson, placeholders, toJobSummary, type JobRow } from "../lib/db";
+import { scopeFilter } from "../lib/scope";
 import { readJson, type AppEnv } from "../lib/validate";
 
 export const activity = new Hono<AppEnv>();
@@ -12,27 +13,35 @@ activity.get("/overview", async (c) => {
   const today = new Date();
   const in14 = new Date(today.getTime() + 14 * 86_400_000).toISOString().slice(0, 10);
   const weekAgo = new Date(today.getTime() - 7 * 86_400_000).toISOString();
+  const [profile, cv] = await Promise.all([getProfile(db), getActiveMasterCv(db)]);
+  // Untracked jobs only count inside the search area.
+  const scope = scopeFilter(profile.searchScope);
+  const inArea = scope ? ` AND ${scope.sql}` : "";
+  const areaParams = scope?.params ?? [];
 
   const [statusRows, inbox, newThisWeek, unread, deadlines] = await db.batch([
     db.prepare("SELECT status, COUNT(*) AS n FROM applications GROUP BY status"),
-    db.prepare("SELECT COUNT(*) AS n FROM jobs j LEFT JOIN applications a ON a.job_id = j.id WHERE a.id IS NULL AND j.dismissed_at IS NULL AND j.closed_at IS NULL AND j.duplicate_of IS NULL"),
-    db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE first_seen_at >= ? AND duplicate_of IS NULL").bind(weekAgo),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM jobs j LEFT JOIN applications a ON a.job_id = j.id WHERE a.id IS NULL AND j.dismissed_at IS NULL AND j.closed_at IS NULL AND j.duplicate_of IS NULL${inArea}`,
+      )
+      .bind(...areaParams),
+    db.prepare(`SELECT COUNT(*) AS n FROM jobs j WHERE j.first_seen_at >= ? AND j.duplicate_of IS NULL${inArea}`).bind(weekAgo, ...areaParams),
     db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE read_at IS NULL"),
     db
       .prepare(
         `SELECT ${JOB_SUMMARY_SELECT} FROM jobs j LEFT JOIN applications a ON a.job_id = j.id
          WHERE j.deadline BETWEEN ? AND ? AND j.closed_at IS NULL AND j.dismissed_at IS NULL
-           AND (a.status IN ('interested', 'preparing', 'ready') OR (a.id IS NULL AND j.duplicate_of IS NULL AND j.match_score >= 60))
+           AND (a.status IN ('interested', 'preparing', 'ready') OR (a.id IS NULL AND j.duplicate_of IS NULL AND j.match_score >= 60${inArea}))
          ORDER BY j.deadline ASC LIMIT 6`,
       )
-      .bind(today.toISOString().slice(0, 10), in14),
+      .bind(today.toISOString().slice(0, 10), in14, ...areaParams),
   ]);
 
   const counts = Object.fromEntries(APPLICATION_STATUSES.map((s) => [s, 0])) as Record<ApplicationStatus, number>;
   for (const r of statusRows!.results as { status: ApplicationStatus; n: number }[]) counts[r.status] = r.n;
   counts.discovered += (inbox!.results[0] as { n: number }).n;
 
-  const [profile, cv] = await Promise.all([getProfile(db), getActiveMasterCv(db)]);
   const overview: Overview = {
     counts,
     newThisWeek: (newThisWeek!.results[0] as { n: number }).n,

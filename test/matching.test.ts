@@ -18,6 +18,7 @@ const baseProfile: Profile = {
   targetRoles: ["backend", "fullstack"],
   preferredLocations: ["London"],
   remotePreference: "any",
+  searchScope: "anywhere",
   workAuthorization: "",
   keywordsInclude: [],
   keywordsExclude: [],
@@ -31,6 +32,10 @@ describe("isRelevantInternship", () => {
     ["Machine Learning Research Intern", true],
     ["Backend Engineer (Internship)", true],
     ["Data Science Co-op", true],
+    ["Quality Assurance - Internship", true],
+    ["Magang Backend Developer", true],
+    ["Build Internship Plus, Software Engineer (Internship) - Mercari", true],
+    ["Intern, Marketing and Partnership (GrabRentals)", false],
     ["Senior Software Engineer", false],
     ["Marketing Intern", false],
     ["Mechanical Engineering Intern", false],
@@ -102,6 +107,19 @@ describe("scoreJob", () => {
   it("caps jobs that mention an excluded keyword", () => {
     const result = scoreJob(job, buildMatchContext({ ...baseProfile, keywordsExclude: ["payments"] }, null));
     expect(result.score).toBeLessThanOrEqual(15);
+  });
+
+  it("ranks by search area when it isn't Anywhere", () => {
+    const ctx = buildMatchContext({ ...baseProfile, preferredLocations: [], searchScope: "indonesia_remote" }, null);
+    const jakarta = scoreJob({ ...job, location: "Jakarta, Indonesia", workplace: "onsite" }, ctx);
+    const remote = scoreJob({ ...job, location: "Remote - APAC", workplace: "remote" }, ctx);
+    const singapore = scoreJob({ ...job, location: "Singapore", workplace: "onsite" }, ctx);
+    const us = scoreJob({ ...job, location: "San Francisco, CA", workplace: "onsite" }, ctx);
+    expect(jakarta.breakdown.location).toBe(100);
+    expect(remote.breakdown.location).toBe(100);
+    expect(singapore.score).toBeLessThan(jakarta.score);
+    expect(us.score).toBeLessThan(singapore.score);
+    expect(us.concerns.join(" ")).toMatch(/outside your search area/);
   });
 
   it("uses skills from the master CV", () => {

@@ -13,7 +13,9 @@ import type {
   JobSummary,
   Priority,
   Profile,
+  Region,
   RemotePreference,
+  SearchScope,
   SourceKind,
   Workplace,
 } from "../../shared/types";
@@ -59,6 +61,7 @@ export interface JobRow {
   title: string;
   location: string;
   workplace: Workplace;
+  region: Region;
   source_kind: SourceKind;
   url: string;
   posted_at: string | null;
@@ -84,18 +87,16 @@ export interface JobDetailRow extends JobRow {
   skills: string;
   fingerprint: string;
   match_detail: string | null;
-  ai_analysis: string | null;
-  ai_analyzed_at: string | null;
   last_seen_at: string;
   source_name: string | null;
 }
 
-export const JOB_SUMMARY_SELECT = `j.id, j.company, j.title, j.location, j.workplace, j.source_kind, j.url, j.posted_at,
+export const JOB_SUMMARY_SELECT = `j.id, j.company, j.title, j.location, j.workplace, j.region, j.source_kind, j.url, j.posted_at,
   j.deadline, j.first_seen_at, j.match_score, j.duplicate_of, j.dismissed_at, j.closed_at,
   a.id AS app_id, a.status AS app_status, a.priority AS app_priority`;
 
 export const JOB_DETAIL_SELECT = `${JOB_SUMMARY_SELECT}, j.source_id, j.external_id, j.department, j.employment_type,
-  j.duration, j.apply_url, j.description, j.skills, j.fingerprint, j.match_detail, j.ai_analysis, j.ai_analyzed_at,
+  j.duration, j.apply_url, j.description, j.skills, j.fingerprint, j.match_detail,
   j.last_seen_at, s.name AS source_name`;
 
 export function toJobSummary(r: JobRow): JobSummary {
@@ -105,6 +106,7 @@ export function toJobSummary(r: JobRow): JobSummary {
     title: r.title,
     location: r.location,
     workplace: r.workplace,
+    region: r.region,
     sourceKind: r.source_kind,
     url: r.url,
     postedAt: r.posted_at,
@@ -128,8 +130,8 @@ export function toJobDetail(r: JobDetailRow, duplicates: JobSummary[], documents
     description: r.description,
     skills: parseJson<JobSkills>(r.skills, { required: [], preferred: [] }),
     matchDetail: parseJson(r.match_detail, null),
-    aiAnalysis: parseJson(r.ai_analysis, null),
-    aiAnalyzedAt: r.ai_analyzed_at,
+    insights: null,
+    insightsStale: false,
     sourceName: r.source_name,
     lastSeenAt: r.last_seen_at,
     duplicates,
@@ -281,6 +283,7 @@ interface ProfileRow {
   target_roles: string;
   preferred_locations: string;
   remote_preference: RemotePreference;
+  search_scope: SearchScope;
   work_authorization: string;
   keywords_include: string;
   keywords_exclude: string;
@@ -304,6 +307,7 @@ export async function getProfile(db: D1Database): Promise<Profile> {
     targetRoles: parseJson(r.target_roles, []),
     preferredLocations: parseJson(r.preferred_locations, []),
     remotePreference: r.remote_preference,
+    searchScope: r.search_scope ?? "indonesia_remote",
     workAuthorization: r.work_authorization,
     keywordsInclude: parseJson(r.keywords_include, []),
     keywordsExclude: parseJson(r.keywords_exclude, []),

@@ -3,11 +3,13 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { importFromUrl, ImportError, manualJob } from "../discovery/import";
 import { ingestJob, loadMatchContext, rescoreAll } from "../discovery/run";
-import { analyzeFit } from "../documents/generate";
+import { analyzeJob } from "../documents/generate";
+import { insightsState } from "../personalization/insights";
 import {
   DOCUMENT_SUMMARY_SELECT,
   eventStmt,
   getJobDetailRow,
+  getProfile,
   JOB_SUMMARY_SELECT,
   nowIso,
   parseJson,
@@ -17,6 +19,7 @@ import {
   type DocumentRow,
   type JobRow,
 } from "../lib/db";
+import { scopeFilter } from "../lib/scope";
 import { idParam, notFound, readJson, type AppEnv } from "../lib/validate";
 
 export const jobs = new Hono<AppEnv>();
@@ -41,6 +44,16 @@ jobs.get("/", async (c) => {
     default: // inbox: open, untracked, not dismissed, not a duplicate
       where.push("a.id IS NULL", "j.dismissed_at IS NULL", "j.closed_at IS NULL", "j.duplicate_of IS NULL");
   }
+  // Tracked and hidden jobs stay visible whatever the search area.
+  if (q.view !== "tracked" && q.view !== "dismissed") {
+    const scope = scopeFilter((await getProfile(c.env.DB)).searchScope);
+    if (scope) {
+      where.push(scope.sql);
+      params.push(...scope.params);
+    }
+  }
+  if (q.region === "indonesia") where.push("j.region = 'indonesia'");
+  else if (q.region === "asia") where.push("j.region IN ('asia', 'remote_asia')");
   const search = q.q?.trim();
   if (search) {
     const like = `%${search.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
@@ -139,7 +152,9 @@ jobs.get("/:id", async (c) => {
       .bind(id, row.fingerprint, id, row.duplicate_of ?? -1),
     db.prepare(`SELECT ${DOCUMENT_SUMMARY_SELECT} FROM documents d LEFT JOIN jobs j ON j.id = d.job_id WHERE d.job_id = ? ORDER BY d.updated_at DESC`).bind(id),
   ]);
-  return c.json(toJobDetail(row, (duplicates!.results as JobRow[]).map(toJobSummary), (documents!.results as DocumentRow[]).map(toDocumentSummary)));
+  const detail = toJobDetail(row, (duplicates!.results as JobRow[]).map(toJobSummary), (documents!.results as DocumentRow[]).map(toDocumentSummary));
+  const { insights, stale } = await insightsState(db, detail);
+  return c.json({ ...detail, insights, insightsStale: stale });
 });
 
 jobs.get("/:id/events", async (c) => {
@@ -184,4 +199,4 @@ jobs.patch("/:id", async (c) => {
   return c.json(toJobDetail(row!, [], []));
 });
 
-jobs.post("/:id/analyze", async (c) => c.json(await analyzeFit(c.env, idParam(c))));
+jobs.post("/:id/insights", async (c) => c.json(await analyzeJob(c.env, idParam(c))));

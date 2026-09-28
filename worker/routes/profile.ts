@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { ROLES } from "../../shared/roles";
+import { SEARCH_SCOPES } from "../../shared/types";
 import { canonicalizeSkill } from "../../shared/skills";
 import { rescoreAll } from "../discovery/run";
 import { eventStmt, getProfile, nowIso } from "../lib/db";
@@ -23,6 +24,7 @@ const ProfileBody = z.object({
   targetRoles: z.array(z.enum(ROLES.map((r) => r.key) as [string, ...string[]])).max(ROLES.length),
   preferredLocations: shortList(30),
   remotePreference: z.enum(["any", "remote", "hybrid", "onsite"]),
+  searchScope: z.enum(SEARCH_SCOPES),
   workAuthorization: z.string().trim().max(300),
   keywordsInclude: shortList(30),
   keywordsExclude: shortList(30),
@@ -47,7 +49,7 @@ profile.put("/", async (c) => {
     db
       .prepare(
         `UPDATE profile SET full_name = ?, email = ?, phone = ?, location = ?, links = ?, headline = ?, education = ?,
-           graduation_date = ?, skills = ?, target_roles = ?, preferred_locations = ?, remote_preference = ?,
+           graduation_date = ?, skills = ?, target_roles = ?, preferred_locations = ?, remote_preference = ?, search_scope = ?,
            work_authorization = ?, keywords_include = ?, keywords_exclude = ?, notify_min_score = ?, updated_at = ?
          WHERE id = 1`,
       )
@@ -64,6 +66,7 @@ profile.put("/", async (c) => {
         JSON.stringify(dedupe(p.targetRoles)),
         JSON.stringify(dedupe(p.preferredLocations)),
         p.remotePreference,
+        p.searchScope,
         p.workAuthorization,
         JSON.stringify(dedupe(p.keywordsInclude)),
         JSON.stringify(dedupe(p.keywordsExclude)),

@@ -473,6 +473,12 @@ function slug(text: string): string {
   );
 }
 
+/** Position-independent key for a CV entry, e.g. "experiences/concorde-systems". Not unique if names repeat. */
+export function entryKey(sectionKey: string, x: CvEntry | CvItem): string {
+  const name = "title" in x ? plain(x.title) : plain(x.heading).split(/\s*\|\s*|\n/)[0]!;
+  return `${sectionKey}/${slug(name)}`;
+}
+
 function stripComments(tex: string): string {
   return tex
     .split("\n")
@@ -754,6 +760,8 @@ export function headerText(content: string): string {
 export interface CvTailoring {
   entries: { id: string; bullets: string[] }[];
   skills: { label: string; items: string[] }[];
+  /** Entry ids judged low-relevance for this job; kept out unless a section needs them to reach its minimum. */
+  omit?: string[];
 }
 
 /** What the job asks for, used to rank entries, bullets and skills deterministically. */
@@ -820,14 +828,17 @@ export function applyTailoring(master: CvDoc, tailoring: CvTailoring, relevance:
     const withBullets = (x: T): T => ({ ...x, bullets: tailorBullets(x.id, x.bullets) });
     if (rule.keepAll) return list.map(withBullets);
 
+    const omitted = (id: string) => (tailoring.omit?.includes(id) && !chosen.has(id) ? 1 : 0);
     const ranked = list
       .map((x, index) => ({ x, index, score: relevanceScore(entryText(x), relevance), model: chosen.get(x.id)?.order }))
       .sort((a, b) => {
         const am = a.model ?? Number.POSITIVE_INFINITY;
         const bm = b.model ?? Number.POSITIVE_INFINITY;
-        return am - bm || b.score - a.score || a.index - b.index;
+        return am - bm || omitted(a.x.id) - omitted(b.x.id) || b.score - a.score || a.index - b.index;
       });
-    const selected = ranked.filter((r, rank) => r.model !== undefined || r.score > 0 || rank < rule.min).slice(0, Math.max(rule.max, rule.min));
+    const selected = ranked
+      .filter((r, rank) => r.model !== undefined || (r.score > 0 && !omitted(r.x.id)) || rank < rule.min)
+      .slice(0, Math.max(rule.max, rule.min));
     const ordered = rule.orderByRelevance ? selected : [...selected].sort((a, b) => a.index - b.index);
     return ordered.map((r) => withBullets(r.x));
   };
@@ -919,32 +930,7 @@ export function omittedEntries(master: CvDoc, tailored: CvDoc): { section: strin
   return result;
 }
 
-/** Compact description of the master CV for the model: ids, context and editable text only. */
-export function cvForPrompt(doc: CvDoc) {
-  return {
-    sections: doc.sections.flatMap((s): Record<string, unknown>[] => {
-      switch (s.type) {
-        case "entries":
-          return [
-            {
-              section: s.title,
-              ...(sectionRule(s).keepAll ? { always_included: true } : {}),
-              entries: s.entries.map((e) => ({
-                id: e.id,
-                organization: plain(e.title),
-                role: plain(e.subtitle),
-                details: [plain(e.titleRight), plain(e.subtitleRight)].filter(Boolean).join(", "),
-                bullets: e.bullets,
-              })),
-            },
-          ];
-        case "items":
-          return [{ section: s.title, entries: s.items.map((i) => ({ id: i.id, heading: plain(i.heading).replace(/\n/g, " | "), date: plain(i.date), bullets: i.bullets })) }];
-        case "skills":
-          return [{ section: s.title, skill_lines: s.lines.map((l) => ({ label: l.label, items: l.items.map((x) => plain(x)) })) }];
-        case "raw":
-          return [];
-      }
-    }),
-  };
+/** Whether tailoring keeps every entry of a section (education, experience, one-line awards). */
+export function isAlwaysIncluded(s: CvSection): boolean {
+  return sectionRule(s).keepAll;
 }

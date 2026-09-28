@@ -12,6 +12,7 @@ import { Discover } from "./pages/Discover";
 import { DocumentReview } from "./pages/DocumentReview";
 import { Documents } from "./pages/Documents";
 import { JobPage } from "./pages/JobPage";
+import { KnowledgePage } from "./pages/Knowledge";
 import { Login } from "./pages/Login";
 import { NotFound } from "./pages/NotFound";
 import { Pipeline } from "./pages/Pipeline";
@@ -67,6 +68,7 @@ function App() {
             <Route path="applications/:appId/apply" element={<ApplyKitPage />} />
             <Route path="documents" element={<Documents />} />
             <Route path="documents/:docId" element={<DocumentReview />} />
+            <Route path="knowledge" element={<KnowledgePage />} />
             <Route path="profile" element={<ProfilePage />} />
             <Route path="sources" element={<Sources />} />
             <Route path="activity" element={<Activity />} />

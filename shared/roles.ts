@@ -60,11 +60,12 @@ export const ROLES: RoleDef[] = [
 
 export const ROLE_LABELS: Record<string, string> = Object.fromEntries(ROLES.map((r) => [r.key, r.label]));
 
+// Includes Indonesian (magang, kerja praktik) and Japanese / Chinese terms. CJK has no word boundaries, so it sits outside \b.
 const INTERNSHIP =
-  /\b(interns?|internships?|co-?op|werkstudent(in)?|working student|summer student|placement student|industrial placement|apprentice(ship)?|stage|praktikum|praktikant(in)?)\b/i;
+  /\b(interns?|internships?|co-?op|werkstudent(in)?|working student|summer student|placement student|industrial placement|apprentice(ship)?|stage|praktikum|praktikant(in)?|magang|kerja prakti[ck]|pkl)\b|インターン|实习|實習/i;
 
 const TECH_TITLE =
-  /software|engineer|developer|programm|computer science|\bcs\b|back[- ]?end|front[- ]?end|full[- ]?stack|machine learning|\bml\b|\bai\b|artificial intelligence|\bdata\b|research|platform|infrastructure|devops|\bsre\b|security|mobile|\bios\b|android|\bweb\b|cloud|quantitative (developer|research)|robotics|systems|technology|\bit\b|analytics/i;
+  /software|engineer|developer|programm|computer science|\bcs\b|back[- ]?end|front[- ]?end|full[- ]?stack|machine learning|\bml\b|\bai\b|artificial intelligence|\bdata\b|research|platform|infrastructure|devops|\bsre\b|security|mobile|\bios\b|android|\bweb\b|cloud|quantitative (developer|research)|robotics|systems|technology|\bit\b|analytics|quality assurance|\bqa\b|\bsdet\b|pengembang|perangkat lunak|エンジニア|ソフトウェア|工程師|工程师/i;
 
 // Titles that mention tech words but are clearly not software internships.
 const NON_SOFTWARE =
@@ -80,7 +81,7 @@ export function isInternshipTitle(title: string, employmentType = ""): boolean {
 export function isRelevantInternship(title: string, department = "", employmentType = ""): boolean {
   if (!isInternshipTitle(title, employmentType)) return false;
   const techInTitle = TECH_TITLE.test(title);
-  const techInDept = /engineering|software|data|research|technology|machine learning|\bai\b|product development|infrastructure|security/i.test(department);
+  const techInDept = /engineering|software|developer|data|research|technology|machine learning|\bai\b|product development|infrastructure|security/i.test(department);
   if (!techInTitle && !techInDept) return false;
   if (NON_SOFTWARE.test(title) && !STRONG_SOFTWARE.test(title)) return false;
   return true;

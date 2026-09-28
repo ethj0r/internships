@@ -30,7 +30,7 @@ Technically possible, but not appropriate as a default:
 | Finding new internships across sources | Yes, hourly |
 | Filtering, deduplicating and ranking by fit | Yes |
 | Extracting requirements, deadline, workplace | Yes |
-| Written fit analysis | Yes, on request |
+| Role analysis: requirement → evidence map, strategy, cited company research | Yes, on request or before the first document |
 | Tailored CV, cover letter, application answers | Drafted on request, **approved by you** |
 | Fabrication checks on drafts | Yes, as warnings |
 | Checklist, links and copy-ready materials | Yes (Apply Kit) |
@@ -42,7 +42,7 @@ Technically possible, but not appropriate as a default:
 ## Human-in-the-loop flow
 
 1. Track an internship from Discover.
-2. **Tailor CV** (and optionally a cover letter and answers). Review the diff against your master CV, fix any warnings, then **Approve**.
+2. **Tailor CV** (and optionally a cover letter and answers). Check the tailoring strategy, the before/after for each bullet and the quality review, fix anything it flags, then **Approve**.
 3. Open the **Apply Kit**: approved CV (print to PDF), cover letter and answers with copy buttons, application link, deadline, checklist.
 4. Submit on the company's site.
 5. Confirm in the **Did you submit your application?** sheet. The application moves to Applied with the date, and the event is logged.

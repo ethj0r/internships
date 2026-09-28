@@ -11,6 +11,7 @@ import { applications } from "./routes/applications";
 import { auth } from "./routes/auth";
 import { documents } from "./routes/documents";
 import { jobs } from "./routes/jobs";
+import { knowledge } from "./routes/knowledge";
 import { profile } from "./routes/profile";
 import { discovery, sources } from "./routes/sources";
 
@@ -43,6 +44,7 @@ app.route("/jobs", jobs);
 app.route("/applications", applications);
 app.route("/documents", documents);
 app.route("/profile", profile);
+app.route("/knowledge", knowledge);
 app.route("/sources", sources);
 app.route("/discovery", discovery);
 app.route("/", activity);

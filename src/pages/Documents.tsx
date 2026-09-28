@@ -104,6 +104,18 @@ export function Documents() {
                   </MenuButton>
                 </div>
               ))}
+              <Link to="/knowledge" className="row inset-icon">
+                <span className="row-icon">
+                  <Icon name="book" />
+                </span>
+                <span className="row-main">
+                  <span className="row-title" style={{ display: "block" }}>
+                    Career Knowledge
+                  </span>
+                  <span className="row-subtitle">Add the context behind your CV entries that applications can draw on</span>
+                </span>
+                <Icon name="chevron-right" className="row-chevron" />
+              </Link>
               <div className="row wrap" style={{ gap: 8 }}>
                 <button type="button" className="btn btn-sm" onClick={() => fileRef.current?.click()}>
                   <Icon name="upload" />

@@ -1,4 +1,6 @@
 import type { Notification } from "../shared/types";
+import { getProfile } from "./lib/db";
+import { scopeFilter } from "./lib/scope";
 
 export function notificationStmt(
   db: D1Database,
@@ -21,6 +23,7 @@ function addDays(date: Date, days: number): string {
 export async function runDeadlineReminders(env: Env): Promise<number> {
   const today = new Date();
   const todayStr = today.toISOString().slice(0, 10);
+  const scope = scopeFilter((await getProfile(env.DB)).searchScope);
   const { results } = await env.DB.prepare(
     `SELECT j.id, j.company, j.title, j.deadline
      FROM jobs j
@@ -28,9 +31,9 @@ export async function runDeadlineReminders(env: Env): Promise<number> {
      WHERE j.deadline BETWEEN ? AND ?
        AND j.closed_at IS NULL AND j.dismissed_at IS NULL AND j.duplicate_of IS NULL
        AND (a.status IN ('interested', 'preparing', 'ready')
-            OR (a.id IS NULL AND j.match_score >= (SELECT notify_min_score FROM profile WHERE id = 1)))`,
+            OR (a.id IS NULL AND j.match_score >= (SELECT notify_min_score FROM profile WHERE id = 1)${scope ? ` AND ${scope.sql}` : ""}))`,
   )
-    .bind(todayStr, addDays(today, 7))
+    .bind(todayStr, addDays(today, 7), ...(scope?.params ?? []))
     .all<{ id: number; company: string; title: string; deadline: string }>();
 
   const stmts = results.map((job) => {
