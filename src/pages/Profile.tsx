@@ -2,9 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { documentText } from "../../shared/cv";
 import { ROLES } from "../../shared/roles";
-import { SEARCH_SCOPE_LABELS } from "../../shared/regions";
 import { extractSkills, sameSkill } from "../../shared/skills";
-import { SEARCH_SCOPES, type Profile, type RemotePreference, type SearchScope } from "../../shared/types";
+import type { Profile, RemotePreference } from "../../shared/types";
 import { ErrorState, Field, Loading, Segmented, TokenInput } from "../components/common";
 import { Icon, Spinner } from "../components/Icon";
 import { useToast } from "../components/Toast";
@@ -17,12 +16,6 @@ export function ProfilePage() {
   if (!profile) return <div className="page">{loading ? <Loading /> : error && <ErrorState error={error} onRetry={() => void reload()} />}</div>;
   return <ProfileForm key={profile.updatedAt} profile={profile} onSaved={mutate} />;
 }
-
-const SCOPE_HINTS: Record<SearchScope, string> = {
-  indonesia_remote: "Internships anywhere in Indonesia, on-site or not, plus remote internships you can do from Indonesia.",
-  asia: "Also on-site and hybrid internships elsewhere in East and Southeast Asia, like Singapore, Tokyo or Taipei.",
-  anywhere: "Every location. Preferred locations and workplace decide how location affects the match score.",
-};
 
 function toInput(p: Profile): ProfileInput {
   const { updatedAt: _ignored, ...rest } = p;
@@ -150,8 +143,21 @@ function ProfileForm({ profile, onSaved }: { profile: Profile; onSaved: (p: Prof
               <Field label="Expected graduation" htmlFor="p-grad">
                 <input id="p-grad" className="input" type="month" value={form.graduationDate ?? ""} onChange={(e) => set("graduationDate", e.target.value || null)} />
               </Field>
-              <Field label="Work authorization" htmlFor="p-auth" hint="e.g. EU citizen, needs sponsorship for the US">
+              <Field label="Work authorization" htmlFor="p-auth" hint="e.g. Indonesian citizen. Used for eligibility concerns, never printed on a CV.">
                 <input id="p-auth" className="input" value={form.workAuthorization} onChange={(e) => set("workAuthorization", e.target.value)} />
+              </Field>
+              <Field
+                label="Singapore work pass (confirmed only)"
+                htmlFor="p-sg-auth"
+                hint="Leave empty until a pass is actually approved. When set, Singapore CVs show it in the header and cover letters may mention it; when empty, neither does."
+              >
+                <input
+                  id="p-sg-auth"
+                  className="input"
+                  placeholder="e.g. Training Employment Pass approved for May–Aug 2027"
+                  value={form.sgWorkAuthorization}
+                  onChange={(e) => set("sgWorkAuthorization", e.target.value)}
+                />
               </Field>
             </div>
           </div>
@@ -206,16 +212,6 @@ function ProfileForm({ profile, onSaved }: { profile: Profile; onSaved: (p: Prof
                   );
                 })}
               </div>
-            </div>
-            <div className="field">
-              <span className="field-label">Search area</span>
-              <Segmented<SearchScope>
-                label="Search area"
-                value={form.searchScope}
-                onChange={(v) => set("searchScope", v)}
-                options={SEARCH_SCOPES.map((s) => ({ value: s, label: SEARCH_SCOPE_LABELS[s] }))}
-              />
-              <p className="field-hint">{SCOPE_HINTS[form.searchScope]}</p>
             </div>
             <div className="field">
               <span className="field-label">Workplace</span>

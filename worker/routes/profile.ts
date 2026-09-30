@@ -4,6 +4,7 @@ import { ROLES } from "../../shared/roles";
 import { SEARCH_SCOPES } from "../../shared/types";
 import { canonicalizeSkill } from "../../shared/skills";
 import { rescoreAll } from "../discovery/run";
+import { classifyPending } from "../eligibility/classify";
 import { eventStmt, getProfile, nowIso } from "../lib/db";
 import { readJson, type AppEnv } from "../lib/validate";
 
@@ -26,6 +27,8 @@ const ProfileBody = z.object({
   remotePreference: z.enum(["any", "remote", "hybrid", "onsite"]),
   searchScope: z.enum(SEARCH_SCOPES),
   workAuthorization: z.string().trim().max(300),
+  // Only a confirmed pass or permit. Empty means none is claimed anywhere.
+  sgWorkAuthorization: z.string().trim().max(200).default(""),
   keywordsInclude: shortList(30),
   keywordsExclude: shortList(30),
   notifyMinScore: z.number().int().min(0).max(100),
@@ -45,12 +48,13 @@ profile.get("/", async (c) => c.json(await getProfile(c.env.DB)));
 profile.put("/", async (c) => {
   const p = await readJson(c, ProfileBody);
   const db = c.env.DB;
+  const before = await getProfile(db);
   await db.batch([
     db
       .prepare(
         `UPDATE profile SET full_name = ?, email = ?, phone = ?, location = ?, links = ?, headline = ?, education = ?,
            graduation_date = ?, skills = ?, target_roles = ?, preferred_locations = ?, remote_preference = ?, search_scope = ?,
-           work_authorization = ?, keywords_include = ?, keywords_exclude = ?, notify_min_score = ?, updated_at = ?
+           work_authorization = ?, sg_work_authorization = ?, keywords_include = ?, keywords_exclude = ?, notify_min_score = ?, updated_at = ?
          WHERE id = 1`,
       )
       .bind(
@@ -68,6 +72,7 @@ profile.put("/", async (c) => {
         p.remotePreference,
         p.searchScope,
         p.workAuthorization,
+        p.sgWorkAuthorization,
         JSON.stringify(dedupe(p.keywordsInclude)),
         JSON.stringify(dedupe(p.keywordsExclude)),
         p.notifyMinScore,
@@ -76,5 +81,15 @@ profile.put("/", async (c) => {
     eventStmt(db, "profile", 1, "updated"),
   ]);
   c.executionCtx.waitUntil(rescoreAll(c.env).catch((err) => console.error(JSON.stringify({ message: "rescore.failed", error: String(err) }))));
+  if (before.sgWorkAuthorization !== p.sgWorkAuthorization) {
+    // Singapore notes quote the confirmed authorization, so those postings are classified again (rules, no model).
+    c.executionCtx.waitUntil(
+      db
+        .prepare("UPDATE jobs SET eligibility_status = 'UNCLASSIFIED' WHERE eligibility_status = 'ELIGIBLE_SINGAPORE'")
+        .run()
+        .then(() => classifyPending(c.env, { modelBudget: 0 }))
+        .catch((err) => console.error(JSON.stringify({ message: "eligibility.refresh_failed", error: String(err) }))),
+    );
+  }
   return c.json(await getProfile(db));
 });

@@ -17,12 +17,14 @@ Types referenced below are defined in [`shared/types.ts`](../shared/types.ts).
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/jobs` | Query: `view` (`inbox` default, `all`, `tracked`, `dismissed`), `q`, `workplace`, `region` (`indonesia`, `asia`), `minScore`, `source`, `sort` (`score`, `newest`, `deadline`), `hasDeadline=1`, `limit` (≤200), `offset`. Returns `{ jobs: JobSummary[], total }`. |
+| GET | `/jobs` | Query: `view` (`inbox` default, `all`, `tracked`, `dismissed`), `q`, `workplace`, `eligibility` (a status, or `eligible`; all but `EXCLUDED` when omitted), `tier` (≤ tier), `season` (`summer_2027`), `minScore`, `source`, `sort` (`priority` default, `score`, `newest`, `deadline`), `hasDeadline=1`, `limit` (≤200), `offset`. Returns `{ jobs: JobSummary[], total }`. Every job has `eligibilityStatus`, `eligibility`, `priorityTier`, `season`, `priorityScore`. |
+| GET | `/jobs/shortlist` | Open postings grouped by eligibility status, ranked by priority. Query: `limit` per group (≤100), `excluded=1` to include excluded. Returns `ShortlistGroup[]`. |
+| POST | `/jobs/:id/eligibility` | `{ action: "approve" }` (a `CHECK_MANUALLY` posting may be tailored), `{ action: "reclassify" }`, or `{ action: "override", status, note? }`. |
 | GET | `/jobs/:id` | `JobDetail`, including duplicates and related documents. |
 | PATCH | `/jobs/:id` | `{ deadline?: "YYYY-MM-DD" \| null, dismissed?: boolean }` |
 | GET | `/jobs/:id/events` | Audit events for the job, its application and documents. |
 | POST | `/jobs/:id/insights` | Rebuilds the job's insights (requirements, evidence map, strategy, cited company research). Returns `JobInsights`. `GET /jobs/:id` includes `insights` and `insightsStale`. |
-| POST | `/jobs/import` | `{ url }` or `{ manual: { company, title, location?, url?, description?, deadline? } }`. Returns `{ id, created, duplicateOf }`. `422` if the page can't be read. |
+| POST | `/jobs/import` | `{ url }` or `{ manual: { company, title, location?, url?, description?, deadline? } }`. Returns `{ id, created, duplicateOf }`. `422` if the page can't be read. New postings are classified for eligibility right away. |
 | POST | `/jobs/rescore` | Recomputes all match scores. |
 
 ## Applications
@@ -42,8 +44,8 @@ Types referenced below are defined in [`shared/types.ts`](../shared/types.ts).
 | GET | `/documents` | Optional `kind`, `jobId`. Summaries only. |
 | GET | `/documents/:id` | Full `Document`; `meta.parentContent` holds the master CV for diffs. |
 | POST | `/documents/master` | `multipart/form-data` with `file` (PDF, DOCX, ODT, HTML, Markdown, TXT; ≤5 MB), or JSON `{ content, title? }`. Becomes the active master CV. |
-| POST | `/documents/tailor` | `{ jobId }` → tailored CV draft. Builds the job's insights first if needed. `meta` has `bulletChanges` (before/after with requirements and evidence), `omitted`, `strategy`, `requirements`, `matches`, `evidence`, `changes` and `review`. |
-| POST | `/documents/cover-letter` | `{ jobId, angle?: string }` → cover letter draft. `angle` is what draws the candidate to the company, in their words. `meta` has `plan`, `grounding`, `companyFacts` and `review`. |
+| POST | `/documents/tailor` | `{ jobId }` → tailored CV draft. `409` unless the posting is eligible or approved. Builds the job's insights first if needed. `meta.verification` has the claim check. `meta` has `bulletChanges` (before/after with requirements and evidence), `omitted`, `strategy`, `requirements`, `matches`, `evidence`, `changes` and `review`. |
+| POST | `/documents/cover-letter` | `{ jobId, angle?: string }` → cover letter draft (`409` unless eligible or approved). `meta.lint` has the rule check, `meta.critique` the recruiter critique and the draft before revision. `angle` is what draws the candidate to the company, in their words. `meta` has `plan`, `grounding`, `companyFacts` and `review`. |
 | POST | `/documents/answers` | `{ jobId, questions?: string[] }` → answers draft. |
 | POST | `/documents/:id/review` | Runs the quality review on a tailored CV or cover letter's current content. Returns the `Document` with `meta.review`. |
 | PATCH | `/documents/:id` | `{ title?, content?, status?: "draft" \| "approved", isActive?: true }`. Content edits re-run fabrication checks and mark the review stale. Approving a tailored CV links it to the application and moves Preparing → Ready. |
@@ -65,7 +67,7 @@ Types in [`shared/personalization.ts`](../shared/personalization.ts).
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/profile` | `Profile` |
-| PUT | `/profile` | Full profile. Skills are canonicalized. Triggers a background rescore. |
+| PUT | `/profile` | Full profile, including `sgWorkAuthorization` (a confirmed Singapore pass, or empty). Skills are canonicalized. Triggers a background rescore; a changed Singapore pass re-checks Singapore postings. |
 
 ## Sources and discovery
 
@@ -76,7 +78,10 @@ Types in [`shared/personalization.ts`](../shared/personalization.ts).
 | PATCH | `/sources/:id` | `{ enabled?, name? }` |
 | DELETE | `/sources/:id` | Jobs are kept. |
 | POST | `/sources/:id/run` | Checks one source now. Returns `DiscoveryRun`. |
-| POST | `/discovery/run` | Runs the next batch of sources now. |
+| POST | `/discovery/run` | Checks the next batch of sources now and classifies what it found. |
+| POST | `/discovery/refresh` | Starts a refresh cycle now (the rest of its sources follow hourly). |
+| GET | `/discovery/cycles` | Last 10 refresh cycles with their summaries. |
+| GET | `/discovery/watchlist` | Big tech career pages that aren't crawled (`config/watchlist.json`). |
 | GET | `/discovery/runs` | Last 20 runs. |
 
 ## Activity

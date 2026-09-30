@@ -1,3 +1,4 @@
+import type { EligibilityStatus } from "../../shared/eligibility";
 import type { JobInsights, KnowledgeBase, KnowledgeNote } from "../../shared/personalization";
 import type {
   Application,
@@ -13,8 +14,11 @@ import type {
   Overview,
   Priority,
   Profile,
+  RefreshCycle,
+  ShortlistGroup,
   Source,
   SourceKind,
+  WatchlistSite,
 } from "../../shared/types";
 
 export class ApiError extends Error {
@@ -64,9 +68,20 @@ export interface JobQuery {
   region?: "indonesia" | "asia";
   minScore?: number;
   source?: string;
-  sort?: "score" | "newest" | "deadline";
+  sort?: "priority" | "score" | "newest" | "deadline";
+  /** One status, "eligible" (the three eligible statuses), or all but excluded when omitted. */
+  eligibility?: EligibilityStatus | "eligible";
   hasDeadline?: "1";
   limit?: number;
+}
+
+/** A model the user can pick for generation (config/models.json). */
+export interface ModelChoice {
+  id: string;
+  label: string;
+  host: string;
+  note: string;
+  isDefault: boolean;
 }
 
 export type ProfileInput = Omit<Profile, "updatedAt">;
@@ -81,9 +96,16 @@ export const api = {
 
   jobs: (params: JobQuery) => request<{ jobs: JobSummary[]; total: number }>("GET", `/jobs${query({ ...params })}`),
   job: (id: number) => request<JobDetail>("GET", `/jobs/${id}`),
+  shortlist: (opts: { excluded?: boolean; limit?: number } = {}) =>
+    request<ShortlistGroup[]>("GET", `/jobs/shortlist${query({ excluded: opts.excluded ? "1" : undefined, limit: opts.limit })}`),
+  jobEligibility: (
+    id: number,
+    body: { action: "approve" } | { action: "reclassify" } | { action: "override"; status: Exclude<EligibilityStatus, "UNCLASSIFIED">; note?: string },
+  ) => request<{ ok: true }>("POST", `/jobs/${id}/eligibility`, body),
   jobEvents: (id: number) => request<AuditEvent[]>("GET", `/jobs/${id}/events`),
   updateJob: (id: number, patch: { deadline?: string | null; dismissed?: boolean }) => request<JobDetail>("PATCH", `/jobs/${id}`, patch),
-  analyzeRole: (id: number) => request<JobInsights>("POST", `/jobs/${id}/insights`, {}),
+  analyzeRole: (id: number, model?: string) => request<JobInsights>("POST", `/jobs/${id}/insights`, { model }),
+  models: () => request<ModelChoice[]>("GET", "/models"),
   importJobUrl: (url: string) => request<{ id: number; created: boolean; duplicateOf: number | null }>("POST", "/jobs/import", { url }),
   importJobManual: (manual: { company: string; title: string; location?: string; url?: string; description?: string; deadline?: string | null }) =>
     request<{ id: number; created: boolean; duplicateOf: number | null }>("POST", "/jobs/import", { manual }),
@@ -118,10 +140,10 @@ export const api = {
   updateDocument: (id: number, patch: { title?: string; content?: string; status?: "draft" | "approved"; isActive?: true }) =>
     request<Document>("PATCH", `/documents/${id}`, patch),
   deleteDocument: (id: number) => request<void>("DELETE", `/documents/${id}`),
-  tailorCv: (jobId: number) => request<Document>("POST", "/documents/tailor", { jobId }),
-  coverLetter: (jobId: number, angle?: string) => request<Document>("POST", "/documents/cover-letter", { jobId, angle }),
-  answers: (jobId: number, questions?: string[]) => request<Document>("POST", "/documents/answers", { jobId, questions }),
-  reviewDocument: (id: number) => request<Document>("POST", `/documents/${id}/review`, {}),
+  tailorCv: (jobId: number, model?: string) => request<Document>("POST", "/documents/tailor", { jobId, model }),
+  coverLetter: (jobId: number, angle?: string, model?: string) => request<Document>("POST", "/documents/cover-letter", { jobId, angle, model }),
+  answers: (jobId: number, questions?: string[], model?: string) => request<Document>("POST", "/documents/answers", { jobId, questions, model }),
+  reviewDocument: (id: number, model?: string) => request<Document>("POST", `/documents/${id}/review`, { model }),
 
   knowledge: () => request<KnowledgeBase>("GET", "/knowledge"),
   createNote: (note: NoteInput) => request<KnowledgeNote>("POST", "/knowledge/notes", note),
@@ -138,6 +160,9 @@ export const api = {
   runSource: (id: number) => request<DiscoveryRun>("POST", `/sources/${id}/run`, {}),
   runDiscovery: () => request<DiscoveryRun>("POST", "/discovery/run", {}),
   discoveryRuns: () => request<DiscoveryRun[]>("GET", "/discovery/runs"),
+  refreshNow: () => request<{ action: string; cycle: RefreshCycle | null; classified: number }>("POST", "/discovery/refresh", {}),
+  refreshCycles: () => request<RefreshCycle[]>("GET", "/discovery/cycles"),
+  watchlist: () => request<WatchlistSite[]>("GET", "/discovery/watchlist"),
 
   notifications: () => request<Notification[]>("GET", "/notifications"),
   markNotificationsRead: (ids?: number[]) => request<{ ok: true }>("POST", "/notifications/read", { ids }),

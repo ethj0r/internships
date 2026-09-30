@@ -1,6 +1,11 @@
-// Evidence-based document generation (docs/personalization.md). Every document starts from the job's insights
-// (requirement → evidence map and strategy), cites the knowledge base, passes deterministic checks and a quality
-// review, and is regenerated once when the review finds it isn't ready. Drafts still need the user's approval.
+// Evidence-based document generation (docs/personalization.md).
+//
+// Only postings that passed the eligibility filter (shared/eligibility.ts) are tailored. Every document starts from
+// the job's insights (role analysis, semantic requirement → evidence map, strategy) and cites the knowledge base.
+// CVs: the model's bullet rewrites pass deterministic guards, then a claim-by-claim verification; anything
+// unsupported falls back to the master CV's wording. Letters: written in the candidate's voice, linted
+// mechanically and regenerated until clean, critiqued by a skeptical-recruiter pass and revised once. Drafts still
+// need the user's approval.
 
 import { HTTPException } from "hono/http-exception";
 import type { z } from "zod";
@@ -10,27 +15,35 @@ import {
   cvToPlainText,
   describeTailoring,
   documentText,
+  estimateLines,
   headerText,
   isLatexCv,
   parseLatexCv,
+  plain,
+  withHeaderItems,
   type CvDoc,
   type CvEntry,
   type CvItem,
   type CvSection,
 } from "../../shared/cv";
+import { canGenerate, ELIGIBILITY_LABELS, type EligibilityStatus } from "../../shared/eligibility";
 import {
   COVER_LETTER_CRITERIA,
   CV_CRITERIA,
   type BulletChange,
+  type ClaimCheck,
   type EvidenceItem,
   type JobInsights,
+  type LetterCritique,
+  type LetterLintReport,
   type LetterPlan,
   type OmittedEntry,
   type QualityCriterion,
   type QualityIssue,
   type QualityReview,
 } from "../../shared/personalization";
-import type { Document, DocumentChange, DocumentMeta, Grounding } from "../../shared/types";
+import { extractSkills } from "../../shared/skills";
+import type { Document, DocumentChange, DocumentMeta, Grounding, JobDetail } from "../../shared/types";
 import {
   AnswersSchema,
   answersPrompt,
@@ -38,22 +51,53 @@ import {
   coverLetterWritePrompt,
   CvPlanSchema,
   CvReviewSchema,
+  cvVerifyPrompt,
+  CvVerifySchema,
   DEFAULT_QUESTIONS,
   FullCvSchema,
+  letterCritiquePrompt,
+  LetterCritiqueSchema,
   LetterPlanSchema,
+  letterRevisePrompt,
   LetterReviewSchema,
   LetterSchema,
   renderAnswersMarkdown,
   reviewPrompt,
   tailorCvFromTextPrompt,
   tailorCvPrompt,
+  type LetterInput,
 } from "../ai/prompts";
 import { AiError, compactPrompts, generateJson } from "../ai/provider";
+import { LETTER_RULES, lintFeedback, lintLetter, locationGuidance, type LintContext, type LintResult } from "../letters/lint";
+import { voiceBlock } from "../letters/voice";
 import { eventStmt, getDocument, getLatestJobDocument, getProfile, nowIso } from "../lib/db";
+import { plainText } from "../lib/text";
 import { missingContactDetails, verifyGenerated } from "../matching/verify";
 import { ensureInsights, loadContext, type Context } from "../personalization/insights";
 import { evidenceText, groupEvidence, loadKnowledge } from "../personalization/knowledge";
 import { applyBulletProposals, cvIssues, letterIssues } from "../personalization/validate";
+
+// ---------- Eligibility gate ----------
+
+/** Tailoring spends model calls, so only postings the candidate can realistically take get through. */
+export function assertCanGenerate(job: JobDetail): void {
+  const status = job.eligibilityStatus;
+  if (canGenerate(job.eligibility ? { status, approvedAt: job.eligibility.approvedAt ?? null } : null)) return;
+  const why: Partial<Record<EligibilityStatus, string>> = {
+    EXCLUDED: `This posting was excluded: ${job.eligibility?.reason ?? "it's outside the locations you can work from."} Override it on the job page if that's wrong.`,
+    CHECK_MANUALLY: `This posting needs a manual check first: ${job.eligibility?.reason ?? ""} Approve it on the job page to generate documents.`,
+    UNCLASSIFIED: "This posting hasn't been through the eligibility check yet. Reclassify it on the job page.",
+  };
+  throw new HTTPException(409, { message: why[status] ?? `Documents can't be generated for postings marked ${ELIGIBILITY_LABELS[status]}.` });
+}
+
+async function loadEligibleContext(env: Env, jobId: number): Promise<Context> {
+  const ctx = await loadContext(env, jobId);
+  assertCanGenerate(ctx.job);
+  return ctx;
+}
+
+// ---------- Storage ----------
 
 /** Moves a tracked job into Preparing (or starts tracking it) when documents are generated. */
 async function markPreparing(env: Env, jobId: number): Promise<D1PreparedStatement[]> {
@@ -95,9 +139,13 @@ async function versionedTitle(env: Env, jobId: number, kind: Document["kind"], b
   return row && row.n > 0 ? `${base} (v${row.n + 1})` : base;
 }
 
-/** Rebuilds a job's insights: requirements, evidence map, strategy and company research. */
+function eligibilityMeta(job: JobDetail): DocumentMeta["eligibility"] {
+  return { status: job.eligibilityStatus, reason: job.eligibility?.reason ?? "", workAuthorizationNote: job.eligibility?.workAuthorizationNote ?? null };
+}
+
+/** Rebuilds a job's insights: role analysis, semantic evidence map, strategy and company research. */
 export async function analyzeJob(env: Env, jobId: number): Promise<JobInsights> {
-  return ensureInsights(env, await loadContext(env, jobId), { refresh: true });
+  return ensureInsights(env, await loadEligibleContext(env, jobId), { refresh: true });
 }
 
 // ---------- Quality review ----------
@@ -155,17 +203,109 @@ interface CvDraft {
   changes: DocumentChange[];
   bulletChanges: BulletChange[];
   omitted: OmittedEntry[];
+  verification: ClaimCheck[];
   checks: QualityIssue[];
   warnings: string[];
 }
 
-function cvChecks(ctx: Context, insights: JobInsights, text: string): QualityIssue[] {
+/**
+ * Location in the header: the candidate's real location, with UTC+7 for remote roles. A Singapore work
+ * authorization line appears only when the profile confirms one; otherwise it's flagged for the candidate.
+ */
+function headerFor(ctx: Context): { items: string[]; warnings: string[] } {
+  const { profile, job } = ctx;
+  const location = profile.location.trim() || "Bandung, Indonesia";
+  const status = job.eligibilityStatus;
+  const items = [status === "ELIGIBLE_REMOTE" ? `${location} (UTC+7)` : location];
+  const warnings: string[] = [];
+  if (status === "ELIGIBLE_SINGAPORE") {
+    if (profile.sgWorkAuthorization.trim()) items.push(`Singapore: ${profile.sgWorkAuthorization.trim()}`);
+    else {
+      warnings.push(
+        `No Singapore work authorization is confirmed in your profile, so this CV doesn't mention one. ${job.eligibility?.workAuthorizationNote ?? ""} Add it under Profile once it's confirmed.`.trim(),
+      );
+    }
+  }
+  return { items, warnings };
+}
+
+function cvChecks(ctx: Context, insights: JobInsights, text: string, headerItems: string[] = []): QualityIssue[] {
   return cvIssues(text, {
     evidence: evidenceText(ctx.knowledge),
-    masterText: documentText(ctx.knowledge.master!.content, { urls: true }),
+    masterText: `${documentText(ctx.knowledge.master!.content, { urls: true })}\n${headerItems.join("\n")}`,
     posting: ctx.job.description,
     employerTerms: insights.requirements.flatMap((r) => r.employerTerms),
   });
+}
+
+function lengthWarning(master: CvDoc, tailored: CvDoc): string[] {
+  const before = estimateLines(master);
+  const after = estimateLines(tailored);
+  return after > before + 1
+    ? [`This version is about ${after - before} lines longer than your master CV. If your master fills one page, this one may spill onto a second; check the PDF and trim a bullet.`]
+    : [];
+}
+
+/**
+ * Checks every rewritten bullet claim by claim against its own evidence. A bullet with an unsupported claim is
+ * replaced by the master CV's bullet it was based on; partly supported claims are flagged for the candidate.
+ */
+async function verifyRewrites(
+  env: Env,
+  ctx: Context,
+  entries: { id: string; bullets: string[] }[],
+  changesByEntry: Map<string, BulletChange[]>,
+  masterBulletsOf: (entryId: string) => string[],
+): Promise<{ checks: ClaimCheck[]; warnings: string[] }> {
+  const k = ctx.knowledge;
+  const items: { id: string; entryId: string; change: BulletChange; evidence: EvidenceItem[] }[] = [];
+  for (const [entryId, changes] of changesByEntry) {
+    const support = groupEvidence(k, k.groupOfEntryId.get(entryId)!);
+    for (const change of changes) {
+      if (change.status !== "rewritten") continue;
+      items.push({ id: `B${items.length + 1}`, entryId, change, evidence: support.filter((e) => e.kind === "heading" || change.evidenceIds.includes(e.id)) });
+    }
+  }
+  if (!items.length) return { checks: [], warnings: [] };
+
+  let data: z.infer<typeof CvVerifySchema>;
+  try {
+    ({ data } = await generateJson(env, {
+      tier: "fast",
+      ...cvVerifyPrompt(items.map((it) => ({ id: it.id, entryLabel: it.change.entryLabel, text: it.change.tailored, evidence: it.evidence.map((e) => ({ id: e.id, text: e.text })) }))),
+      schema: CvVerifySchema,
+    }));
+  } catch (err) {
+    console.warn(JSON.stringify({ message: "cv.verify_failed", error: String(err) }));
+    return { checks: [], warnings: ["The claim-by-claim verification couldn't run this time. Check the rewritten bullets against your master CV yourself."] };
+  }
+
+  const checks: ClaimCheck[] = [];
+  for (const it of items) {
+    const result = data.bullets.find((b) => b.bullet_id === it.id);
+    if (!result) continue;
+    const claims = result.claims.map((c) => ({ claim: c.claim.trim(), support: c.support, evidenceIds: c.evidence_ids.filter((id) => k.byId.has(id)), problem: c.problem.trim() }));
+    const unsupported = claims.filter((c) => c.support === "unsupported");
+    const partial = claims.filter((c) => c.support === "partial");
+    let action: ClaimCheck["action"] = "kept";
+    if (unsupported.length) {
+      const entry = entries.find((e) => e.id === it.entryId);
+      const n = Number(it.change.evidenceIds.map((id) => id.match(/\.b(\d+)$/)?.[1]).find(Boolean));
+      const original = Number.isInteger(n) ? masterBulletsOf(it.entryId)[n - 1] : undefined;
+      const index = entry?.bullets.findIndex((b) => plain(b) === it.change.tailored) ?? -1;
+      if (entry && original && index >= 0) {
+        entry.bullets[index] = original;
+        it.change.proposed = it.change.tailored;
+        it.change.tailored = plain(original);
+        it.change.status = "reverted";
+        action = "reverted";
+      }
+      it.change.issues.push(...unsupported.map((c) => `Verification: “${c.claim}” isn't supported by this entry's evidence${c.problem ? ` (${c.problem})` : ""}.`));
+    }
+    it.change.issues.push(...partial.map((c) => `Verification: “${c.claim}” goes beyond the evidence${c.problem ? `: ${c.problem}` : ""}. Check the wording.`));
+    checks.push({ entryLabel: it.change.entryLabel, bullet: it.change.proposed ?? it.change.tailored, claims, action });
+  }
+  return { checks, warnings: [] };
 }
 
 async function draftLatexCv(env: Env, ctx: Context, insights: JobInsights, feedback: string[]): Promise<CvDraft> {
@@ -200,7 +340,9 @@ async function draftLatexCv(env: Env, ctx: Context, insights: JobInsights, feedb
     entries.push({ id: proposal.id, bullets });
   }
 
-  const doc = applyTailoring(master, { entries, skills: data.skills, omit: data.omit.map((o) => o.id) }, job.skills);
+  const verified = await verifyRewrites(env, ctx, entries, changesByEntry, (id) => located.get(id)?.x.bullets ?? []);
+  const header = headerFor(ctx);
+  const doc = withHeaderItems(applyTailoring(master, { entries, skills: data.skills, omit: data.omit.map((o) => o.id) }, job.skills), header.items);
   const kept = new Set(doc.sections.flatMap((s) => (s.type === "entries" ? s.entries.map((e) => e.id) : s.type === "items" ? s.items.map((i) => i.id) : [])));
   const omitted: OmittedEntry[] = [...located]
     .filter(([id]) => !kept.has(id))
@@ -217,8 +359,9 @@ async function draftLatexCv(env: Env, ctx: Context, insights: JobInsights, feedb
     changes: describeTailoring(master, doc).filter((c) => !c.change.startsWith("Left out")),
     bulletChanges: [...changesByEntry].filter(([id]) => kept.has(id)).flatMap(([, c]) => c),
     omitted,
-    checks: cvChecks(ctx, insights, text),
-    warnings: [],
+    verification: verified.checks,
+    checks: cvChecks(ctx, insights, text, header.items),
+    warnings: [...header.warnings, ...verified.warnings, ...lengthWarning(master, doc)],
   };
 }
 
@@ -260,7 +403,8 @@ function fullCvToDoc(data: z.infer<typeof FullCvSchema>): CvDoc {
 async function draftTextCv(env: Env, ctx: Context, insights: JobInsights, feedback: string[]): Promise<CvDraft> {
   const { knowledge: k, job, profile } = ctx;
   const { data, generator } = await generateJson(env, { ...tailorCvFromTextPrompt({ profile, knowledge: k, job, insights, compact: compactPrompts(env), feedback }), schema: FullCvSchema });
-  const doc = fullCvToDoc(data);
+  const header = headerFor(ctx);
+  const doc = withHeaderItems(fullCvToDoc(data), header.items);
   const text = cvToPlainText(doc, { urls: true });
   return {
     doc,
@@ -269,9 +413,11 @@ async function draftTextCv(env: Env, ctx: Context, insights: JobInsights, feedba
     changes: data.changes,
     bulletChanges: [],
     omitted: [],
-    checks: cvChecks(ctx, insights, text),
+    verification: [],
+    checks: cvChecks(ctx, insights, text, header.items),
     warnings: [
       "Your master CV isn't a LaTeX file, so the template was filled from its extracted text and bullet-by-bullet tracing isn't available. Upload your résumé's .tex source under Documents to keep its exact wording and structure.",
+      ...header.warnings,
       ...missingContactDetails(cvToPlainText({ header: doc.header, sections: [] }, { urls: true }), headerText(k.master!.content)),
     ],
   };
@@ -287,7 +433,7 @@ async function reviewCv(env: Env, ctx: Context, insights: JobInsights, draft: { 
 
 /** Tailored CVs are always LaTeX in the résumé template (shared/cvTemplate.ts). */
 export async function generateTailoredCv(env: Env, jobId: number): Promise<number> {
-  const ctx = await loadContext(env, jobId);
+  const ctx = await loadEligibleContext(env, jobId);
   const insights = await ensureInsights(env, ctx);
   const draftCv = ctx.knowledge.doc?.sections.length ? draftLatexCv : draftTextCv;
   const { draft, review } = await draftWithReview(
@@ -308,25 +454,18 @@ export async function generateTailoredCv(env: Env, jobId: number): Promise<numbe
       warnings: draft.warnings,
       bulletChanges: draft.bulletChanges,
       omitted: draft.omitted,
+      verification: draft.verification,
       strategy: insights.strategy,
       requirements: insights.requirements,
       matches: insights.matches,
       evidence: citedEvidence(insights, draft.bulletChanges.flatMap((b) => b.evidenceIds)),
+      eligibility: eligibilityMeta(ctx.job),
       review,
     },
   });
 }
 
 // ---------- Cover letter ----------
-
-interface LetterDraft {
-  content: string;
-  generator: string;
-  plan: LetterPlan;
-  grounding: Grounding[];
-  evidenceIds: string[];
-  checks: QualityIssue[];
-}
 
 /** The CV a cover letter accompanies: the job's approved or latest tailored CV, else the master. */
 async function letterCvText(env: Env, ctx: Context): Promise<string> {
@@ -343,16 +482,96 @@ function letterChecks(ctx: Context, insights: JobInsights, content: string, cvTe
   });
 }
 
-const wordCount = (text: string) => text.split(/\s+/).filter(Boolean).length;
+const CAPITALIZED_STOP = new Set("The We You Our This In At For As If And Or But With From About What Who How Why When Where Your Their They It Is Are Be To Of On By An A Us All Any Each More Most Other Some Such No Not Only Own Same So Than Too Very Can Will Just Should Now Join Apply Please Benefits Requirements Responsibilities Qualifications Internship Intern Role Team".split(" "));
 
-async function draftLetter(env: Env, ctx: Context, insights: JobInsights, cvText: string, angle: string, feedback: string[]): Promise<LetterDraft> {
+/** Terms that make a paragraph specific to the candidate or to this company, for the lint's specificity rule. */
+function specificityTerms(ctx: Context, insights: JobInsights): Pick<LintContext, "candidateTerms" | "companyTerms"> {
+  const k = ctx.knowledge;
+  const evidence = evidenceText(k);
+  const candidateTerms = [
+    ...new Set([
+      ...k.evidence.filter((e) => e.kind === "heading" || e.kind === "note").map((e) => e.label.split(/[,|(]/)[0]!.trim()),
+      ...k.evidence.flatMap((e) => e.technologies),
+      ...extractSkills(evidence),
+      ...(evidence.match(/\b\d[\d,.+%]*\b/g) ?? []).filter((n) => n.length >= 2),
+    ]),
+  ].filter((t) => t.length >= 2);
+  const posting = plainText(ctx.job.description);
+  const capitalized = (posting.match(/\b[A-Z][A-Za-z0-9]{2,}(?:\s[A-Z][A-Za-z0-9]+)*\b/g) ?? []).filter((w) => !CAPITALIZED_STOP.has(w.split(" ")[0]!));
+  const companyTerms = [
+    ...new Set([
+      ctx.job.company,
+      ...ctx.job.company.split(/\s+/),
+      ...capitalized,
+      ...extractSkills(posting),
+      ...insights.requirements.flatMap((r) => r.employerTerms),
+      ...(insights.role?.coreProblems ?? []).flatMap((p) => p.split(/\s+/).filter((w) => w.length >= 6)),
+      ...insights.companyFacts.flatMap((f) => f.text.match(/\b[A-Z][A-Za-z0-9]{2,}\b/g) ?? []),
+    ]),
+  ].filter((t) => t.length >= 2);
+  return { candidateTerms, companyTerms };
+}
+
+interface LetterDraft {
+  content: string;
+  generator: string;
+  claims: z.infer<typeof LetterSchema>["claims"];
+  lint: LintResult;
+}
+
+function lintRank(l: LintResult): number {
+  return l.violations.length;
+}
+
+/** Writes (or revises) until the lint passes or the attempts run out. Returns the draft with the fewest violations. */
+async function untilClean(write: (feedback: string) => Promise<{ content: string; generator: string; claims: LetterDraft["claims"] }>, lint: (content: string) => LintResult, attempts: number) {
+  let best: LetterDraft | null = null;
+  let feedback = "";
+  let tries = 0;
+  for (; tries < attempts; tries++) {
+    const written = await write(feedback);
+    const result = lint(written.content);
+    const draft = { ...written, lint: result };
+    if (!best || lintRank(result) < lintRank(best.lint)) best = draft;
+    if (result.ok) break;
+    feedback = lintFeedback(result);
+  }
+  return { draft: best!, attempts: Math.min(tries + 1, attempts) };
+}
+
+function critiqueText(c: z.infer<typeof LetterCritiqueSchema>): string {
+  return [
+    `Verdict: ${c.verdict}. ${c.summary}`,
+    ...c.flags.map((f) => `- “${f.quote}”: ${f.problem} Fix: ${f.fix}`),
+    c.strongest_line ? `Strongest line, keep its style: “${c.strongest_line}”` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export async function generateCoverLetter(env: Env, jobId: number, angle = ""): Promise<number> {
+  const ctx = await loadEligibleContext(env, jobId);
+  const insights = await ensureInsights(env, ctx);
+  const cvText = await letterCvText(env, ctx);
   const { knowledge: k, job, profile } = ctx;
-  const input = { profile, knowledge: k, job, insights, cvText, angle, compact: compactPrompts(env), feedback };
+  const trimmedAngle = angle.trim();
+
+  const guidance = locationGuidance(job.eligibilityStatus, {
+    location: profile.location,
+    sgWorkAuthorization: profile.sgWorkAuthorization,
+    timezoneNote: job.eligibility?.timezoneNote ?? null,
+    asyncEvidence: /\b(async|asynchronous|remote|distributed|across time zones)\b/i.test(evidenceText(k)),
+  });
+  const input: LetterInput = { profile, knowledge: k, job, insights, cvText, angle: trimmedAngle, compact: compactPrompts(env), locationGuidance: guidance, voice: voiceBlock() };
+  const lintCtx: LintContext = { company: job.company, status: job.eligibilityStatus, sgWorkAuthorization: profile.sgWorkAuthorization, ...specificityTerms(ctx, insights) };
+  const lint = (content: string) => lintLetter(content, lintCtx);
+
   const factIds = new Set(["posting", ...insights.companyFacts.map((f) => f.id)]);
   const requirementIds = new Set(insights.requirements.map((r) => r.id));
-  const validEvidence = (ids: string[]) => [...new Set(ids)].filter((id) => k.byId.has(id) || (angle && id === "angle"));
+  const validEvidence = (ids: string[]) => [...new Set(ids)].filter((id) => k.byId.has(id) || (trimmedAngle && id === "angle"));
   const validFacts = (ids: string[]) => [...new Set(ids)].filter((id) => factIds.has(id));
 
+  // 1. Plan.
   const { data: p } = await generateJson(env, { ...coverLetterPlanPrompt(input), schema: LetterPlanSchema });
   const narrative = p.narrative.map((n) => ({
     need: n.need.trim(),
@@ -362,6 +581,8 @@ async function draftLetter(env: Env, ctx: Context, insights: JobInsights, cvText
     evidenceIds: validEvidence(n.evidence_ids),
   }));
   const plan: LetterPlan = {
+    opening: p.opening.trim(),
+    locationSentence: p.location_sentence.trim(),
     companyNeed: p.company_need.trim(),
     whyRole: p.why_role.trim(),
     whyCompany: p.why_company.trim(),
@@ -371,20 +592,75 @@ async function draftLetter(env: Env, ctx: Context, insights: JobInsights, cvText
     motivation: p.motivation.trim(),
   };
 
-  // Smaller models occasionally return an empty letter: retry once, then fail rather than save it.
-  const write = () => generateJson(env, { ...coverLetterWritePrompt({ ...input, plan }), schema: LetterSchema });
-  let written = await write();
-  if (wordCount(written.data.letter_markdown) < 120) written = await write();
-  const { data, generator } = written;
-  const content = data.letter_markdown.trim();
-  if (wordCount(content) < 120) throw new AiError("The model didn't return a complete letter. Try again.");
+  // 2. Write, lint, and rewrite with the violations until clean.
+  const written = await untilClean(
+    async (feedback) => {
+      const r = await generateJson(env, { ...coverLetterWritePrompt({ ...input, plan, lintFeedback: feedback }), schema: LetterSchema, temperature: 0.7 });
+      return { content: r.data.letter_markdown.trim(), generator: r.generator, claims: r.data.claims };
+    },
+    lint,
+    LETTER_RULES.maxLintAttempts,
+  );
+  let draft = written.draft;
+  let lintAttempts = written.attempts;
+  if (draft.lint.words < 80) throw new AiError("The model didn't return a complete letter. Try again.");
 
-  const checks = letterChecks(ctx, insights, content, cvText, angle);
-  for (const claim of data.claims) {
+  // 3. A skeptical recruiter reads it; one revision from the critique, linted again.
+  let critique: LetterCritique | undefined;
+  try {
+    const { data: c } = await generateJson(env, { ...letterCritiquePrompt({ job, insights, letter: draft.content, compact: input.compact }), schema: LetterCritiqueSchema });
+    critique = { flags: c.flags, strongestLine: c.strongest_line, verdict: c.verdict, summary: c.summary, revised: false };
+    if (LETTER_RULES.maxRecruiterRevisions > 0 && (c.verdict === "revise" || c.flags.length)) {
+      const revision = await untilClean(
+        async (feedback) => {
+          const r = await generateJson(env, {
+            ...letterRevisePrompt({ ...input, letter: draft.content, critique: critiqueText(c), lintFeedback: feedback }),
+            schema: LetterSchema,
+            temperature: 0.6,
+          });
+          return { content: r.data.letter_markdown.trim(), generator: r.generator, claims: r.data.claims };
+        },
+        lint,
+        Math.max(1, LETTER_RULES.maxLintAttempts - 1),
+      );
+      // The revision replaces the draft unless it breaks more rules than the draft did.
+      if (lintRank(revision.draft.lint) <= lintRank(draft.lint) && revision.draft.lint.words >= 80) {
+        critique = { ...critique, revised: true, before: draft.content };
+        draft = revision.draft;
+        lintAttempts += revision.attempts;
+      }
+    }
+  } catch (err) {
+    console.warn(JSON.stringify({ message: "letter.critique_failed", jobId, error: String(err) }));
+  }
+
+  // 4. Grounding and the final scored review.
+  const checks = letterChecks(ctx, insights, draft.content, cvText, trimmedAngle);
+  for (const v of draft.lint.violations) checks.push({ severity: "blocking", message: `Rule: ${v.message}`, quote: v.quote, source: "check" });
+  for (const claim of draft.claims) {
     if (!validEvidence(claim.evidence_ids).length && !validFacts(claim.company_fact_ids).length) {
       checks.push({ severity: "blocking", message: "This claim doesn't trace to your knowledge base or to a cited source.", quote: claim.claim, source: "check" });
     }
   }
+  // The recruiter pass already judged it, so there's no extra reviewer call here (fast mode). "Review Again" on the
+  // document runs the full scored review on demand.
+  const blockingCount = checks.filter((c) => c.severity === "blocking").length;
+  const review: QualityReview = {
+    verdict: blockingCount ? "needs_work" : "ready",
+    summary: [
+      blockingCount ? `${blockingCount === 1 ? "1 issue" : `${blockingCount} issues`} to fix before sending.` : "Passes the writing rules and the grounding checks.",
+      critique ? `Recruiter: ${critique.summary}${critique.revised ? " (revised once after this)" : ""}` : "",
+      "Run Review Again for per-criterion scores.",
+    ]
+      .filter(Boolean)
+      .join(" "),
+    scores: [],
+    issues: checks,
+    attempts: 1,
+    generator: "Writing rules and recruiter critique",
+    reviewedAt: nowIso(),
+    stale: false,
+  };
 
   const sourceLabel = (id: string) => {
     if (id === "angle") return "What you asked the letter to reflect";
@@ -394,61 +670,37 @@ async function draftLetter(env: Env, ctx: Context, insights: JobInsights, cvText
     const e = k.byId.get(id);
     return e ? `${e.label} (${id})` : id;
   };
-  return {
-    content,
-    generator,
-    checks,
-    plan,
-    grounding: data.claims.map((c) => ({
-      claim: c.claim,
-      source: [...validEvidence(c.evidence_ids), ...validFacts(c.company_fact_ids)].map(sourceLabel).join("; ") || "Nothing supports this claim.",
-    })),
-    evidenceIds: [...data.claims.flatMap((c) => validEvidence(c.evidence_ids)), ...narrative.flatMap((n) => n.evidenceIds)],
-  };
-}
-
-async function reviewLetter(
-  env: Env,
-  ctx: Context,
-  insights: JobInsights,
-  draft: { content: string; checks: QualityIssue[] },
-  cvText: string,
-  attempts: number,
-): Promise<QualityReview> {
-  const { data, generator } = await generateJson(env, {
-    ...reviewPrompt({ kind: "cover_letter", content: draft.content, knowledge: ctx.knowledge, job: ctx.job, insights, checks: draft.checks, cvText, compact: compactPrompts(env) }),
-    schema: LetterReviewSchema,
-  });
-  return toReview(data, COVER_LETTER_CRITERIA, draft.checks, attempts, generator);
-}
-
-export async function generateCoverLetter(env: Env, jobId: number, angle = ""): Promise<number> {
-  const ctx = await loadContext(env, jobId);
-  const insights = await ensureInsights(env, ctx);
-  const cvText = await letterCvText(env, ctx);
-  const { draft, review } = await draftWithReview(
-    (feedback) => draftLetter(env, ctx, insights, cvText, angle.trim(), feedback),
-    (d, attempts) => reviewLetter(env, ctx, insights, d, cvText, attempts),
-  );
+  const grounding: Grounding[] = draft.claims.map((c) => ({
+    claim: c.claim,
+    source: [...validEvidence(c.evidence_ids), ...validFacts(c.company_fact_ids)].map(sourceLabel).join("; ") || "Nothing supports this claim.",
+  }));
+  const evidenceIds = [...draft.claims.flatMap((c) => validEvidence(c.evidence_ids)), ...narrative.flatMap((n) => n.evidenceIds)];
+  const lintReport: LetterLintReport = { ok: draft.lint.ok, words: draft.lint.words, attempts: lintAttempts, violations: draft.lint.violations, warnings: draft.lint.warnings };
 
   return insertDocument(env, {
     kind: "cover_letter",
-    title: await versionedTitle(env, jobId, "cover_letter", `Cover letter for ${ctx.job.company}`),
+    title: await versionedTitle(env, jobId, "cover_letter", `Cover letter for ${job.company}`),
     jobId,
-    parentId: ctx.knowledge.master!.id,
+    parentId: k.master!.id,
     content: draft.content,
     meta: {
       generator: draft.generator,
-      grounding: draft.grounding,
-      warnings: [],
-      plan: draft.plan,
+      grounding,
+      warnings: [
+        ...draft.lint.warnings.map((w) => w.message),
+        ...(draft.lint.ok ? [] : [`The letter still breaks ${draft.lint.violations.length} writing rule(s) after ${lintAttempts} attempts. Fix them before sending.`]),
+      ],
+      plan,
       strategy: insights.strategy,
       requirements: insights.requirements,
       matches: insights.matches,
       companyFacts: insights.companyFacts,
-      evidence: citedEvidence(insights, draft.evidenceIds),
+      evidence: citedEvidence(insights, evidenceIds),
+      eligibility: eligibilityMeta(job),
+      lint: lintReport,
+      critique,
       review,
-      ...(angle.trim() ? { angle: angle.trim() } : {}),
+      ...(trimmedAngle ? { angle: trimmedAngle } : {}),
     },
   });
 }
@@ -456,7 +708,7 @@ export async function generateCoverLetter(env: Env, jobId: number, angle = ""): 
 // ---------- Application answers ----------
 
 export async function generateAnswers(env: Env, jobId: number, questions?: string[]): Promise<number> {
-  const ctx = await loadContext(env, jobId);
+  const ctx = await loadEligibleContext(env, jobId);
   const insights = await ensureInsights(env, ctx);
   const qs = questions?.map((q) => q.trim()).filter(Boolean);
   const finalQuestions = qs?.length ? qs : DEFAULT_QUESTIONS(ctx.job.company);
@@ -484,7 +736,7 @@ export async function generateAnswers(env: Env, jobId: number, questions?: strin
 
 const blocking = (message: string): QualityIssue => ({ severity: "blocking", message, quote: "", source: "check" });
 
-/** Runs the quality review on a document's current content, e.g. after the user edits it. */
+/** Runs the quality review on a document's current content, e.g. after the user edits it. Letters are re-linted too. */
 export async function reviewDocument(env: Env, id: number): Promise<void> {
   const doc = await getDocument(env.DB, id);
   if (!doc) throw new HTTPException(404, { message: "Document not found." });
@@ -496,23 +748,31 @@ export async function reviewDocument(env: Env, id: number): Promise<void> {
   const attempts = doc.meta.review?.attempts ?? 1;
 
   let review: QualityReview;
+  let lintReport: LetterLintReport | undefined;
   if (doc.kind === "tailored_cv") {
     const text = documentText(doc.content, { urls: true });
     const checks = [
       ...(isLatexCv(doc.content) && !parseLatexCv(doc.content) ? [blocking("This LaTeX couldn't be read. Check for unbalanced braces.")] : []),
       ...missingContactDetails(headerText(doc.content), headerText(ctx.knowledge.master!.content)).map(blocking),
-      ...cvChecks(ctx, insights, text),
+      ...cvChecks(ctx, insights, text, headerFor(ctx).items),
     ];
     review = await reviewCv(env, ctx, insights, { text, checks }, attempts);
   } else {
     const cvText = await letterCvText(env, ctx);
     const checks = letterChecks(ctx, insights, doc.content, cvText, doc.meta.angle ?? "");
-    review = await reviewLetter(env, ctx, insights, { content: doc.content, checks }, cvText, attempts);
+    const result = lintLetter(doc.content, { company: ctx.job.company, status: ctx.job.eligibilityStatus, sgWorkAuthorization: ctx.profile.sgWorkAuthorization, ...specificityTerms(ctx, insights) });
+    for (const v of result.violations) checks.push({ severity: "blocking", message: `Rule: ${v.message}`, quote: v.quote, source: "check" });
+    lintReport = { ok: result.ok, words: result.words, attempts: doc.meta.lint?.attempts ?? 1, violations: result.violations, warnings: result.warnings };
+    const { data, generator } = await generateJson(env, {
+      ...reviewPrompt({ kind: "cover_letter", content: doc.content, knowledge: ctx.knowledge, job: ctx.job, insights, checks, cvText, compact: compactPrompts(env) }),
+      schema: LetterReviewSchema,
+    });
+    review = toReview(data, COVER_LETTER_CRITERIA, checks, attempts, generator);
   }
 
   const { parentContent: _omit, ...meta } = doc.meta;
   await env.DB.batch([
-    env.DB.prepare("UPDATE documents SET meta = ? WHERE id = ?").bind(JSON.stringify({ ...meta, review, warnings: [] }), id),
+    env.DB.prepare("UPDATE documents SET meta = ? WHERE id = ?").bind(JSON.stringify({ ...meta, review, ...(lintReport ? { lint: lintReport } : {}), warnings: [] }), id),
     eventStmt(env.DB, "document", id, "reviewed", { kind: doc.kind, verdict: review.verdict }),
   ]);
 }
@@ -530,7 +790,7 @@ export async function metaAfterEdit(env: Env, doc: Document, content: string): P
   const review = meta.review ? { review: { ...meta.review, stale: true } } : {};
   if (!source) return { ...meta, ...review, warnings: [] };
 
-  const evidence = [evidenceText(knowledge), documentText(source.content), meta.angle ?? ""].join("\n");
+  const evidence = [evidenceText(knowledge), documentText(source.content), meta.angle ?? "", profile.location].join("\n");
   const checks = verifyGenerated(documentText(content), { evidence, context: job?.description ?? "" });
   if (doc.kind !== "tailored_cv") return { ...meta, ...review, warnings: checks };
   const unreadable = isLatexCv(content) && !parseLatexCv(content) ? ["This LaTeX couldn't be read. Check for unbalanced braces."] : [];

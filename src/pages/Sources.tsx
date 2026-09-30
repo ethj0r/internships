@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import type { Source, SourceKind } from "../../shared/types";
 import { ErrorState, Field, Loading, Switch } from "../components/common";
+import { RefreshCard } from "../components/Eligibility";
 import { Icon, Spinner } from "../components/Icon";
 import { MenuButton } from "../components/Menu";
 import { useToast } from "../components/Toast";
@@ -70,13 +71,15 @@ export function Sources() {
         <header className="page-header">
           <div>
             <h1 className="large-title">Sources</h1>
-            <p className="page-subtitle">{plural(enabled, "source")} checked in rotation every hour.</p>
+            <p className="page-subtitle">{plural(enabled, "source")}, each checked once every 3 days.</p>
           </div>
           <button type="button" className="btn" onClick={() => void run("all")} disabled={runningId !== null}>
             {runningId === "all" ? <Spinner /> : <Icon name="refresh" />}
             Check Now
           </button>
         </header>
+
+        <RefreshCard />
 
         <AddSourceForm />
 

@@ -1,0 +1,10 @@
+{
+  "note": "Real postings from the production database on 2026-09-28. jobId matches a D1 restored from `wrangler d1 export --remote`; on another database, import each url first. `generate` marks the postings used for before/after CV and cover letter comparisons.",
+  "postings": [
+    { "jobId": 2, "company": "Stripe", "title": "Software Engineer, Intern", "location": "Singapore", "url": "https://stripe.com/jobs/search?gh_jid=8130883", "expectedStatus": "ELIGIBLE_SINGAPORE", "generate": true },
+    { "jobId": 52, "company": "Hudson Manpower", "title": "AI Tools & Automation Intern (Developer)", "location": "Remote, Worldwide", "url": "https://himalayas.app/companies/hudson-manpower/jobs/ai-tools-automation-intern-developer", "expectedStatus": "ELIGIBLE_REMOTE", "generate": true },
+    { "jobId": 45, "company": "GDP Labs", "title": "Software Development Engineer - Internship", "location": "Jakarta, Indonesia", "url": "https://career.catapa.com/GDPLabs/0824bcd4-2818-4e3d-b403-21e33109d435", "expectedStatus": "ELIGIBLE_INDONESIA", "generate": false },
+    { "jobId": 43, "company": "The Muse", "title": "Back-end Developer - Remote Internship", "location": "Flexible / Remote", "url": "https://www.themuse.com/jobs/themuse/backend-developer-remote-internship", "expectedStatus": "CHECK_MANUALLY", "generate": false },
+    { "jobId": 36, "company": "Dropbox", "title": "Software Engineering Intern (Summer 2027)", "location": "Remote - US: All locations", "url": "https://jobs.dropbox.com/listing/8106224?gh_jid=8106224", "expectedStatus": "EXCLUDED", "generate": false }
+  ]
+}

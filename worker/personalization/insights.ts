@@ -2,16 +2,18 @@
 // strategy and cited company research. Built once per job and reused by every document until its inputs change.
 
 import { HTTPException } from "hono/http-exception";
-import type { CompanyFact, JobInsights, JobRequirement } from "../../shared/personalization";
+import { quoteAppears } from "../../shared/eligibility";
+import type { CompanyFact, JobInsights, JobRequirement, RoleAnalysis } from "../../shared/personalization";
 import type { JobDetail, Profile } from "../../shared/types";
-import { InsightsSchema, insightsPrompt, researchPrompt } from "../ai/prompts";
+import { companySignals, EvidenceJudgeSchema, evidenceJudgePrompt, researchPrompt, RoleAnalysisSchema, roleAnalysisPrompt } from "../ai/prompts";
 import { compactPrompts, generateJson, researchWeb, usesClaude } from "../ai/provider";
 import { eventStmt, getJobDetailRow, getProfile, nowIso, parseJson, toJobDetail } from "../lib/db";
-import { sha256Hex } from "../lib/text";
+import { plainText, sha256Hex } from "../lib/text";
 import { loadKnowledge, type Knowledge } from "./knowledge";
+import { retrieveEvidence, type Retrieval } from "./semantic";
 import { parseResearchFacts, validateMatches } from "./validate";
 
-export const INSIGHTS_VERSION = 2;
+export const INSIGHTS_VERSION = 3;
 const MAX_REQUIREMENTS = 14;
 
 export interface Context {
@@ -43,6 +45,7 @@ export function insightsHash({ job, profile, knowledge }: Context): Promise<stri
       profile.education,
       profile.skills,
       profile.targetRoles,
+      companySignals(job.company),
     ]),
   );
 }
@@ -93,12 +96,17 @@ async function researchCompany(env: Env, job: JobDetail): Promise<CompanyFact[]>
 
 async function buildInsights(env: Env, ctx: Context, inputsHash: string): Promise<JobInsights> {
   const { job, profile, knowledge } = ctx;
+  const compact = compactPrompts(env);
   const companyFacts = await researchCompany(env, job);
-  const { data, generator } = await generateJson(env, { ...insightsPrompt({ profile, knowledge, job, facts: companyFacts, compact: compactPrompts(env) }), schema: InsightsSchema });
 
-  // Requirement ids are reassigned in order so every reference is predictable.
+  // 1. Understand the role, without the candidate's CV in view.
+  const analysis = await generateJson(env, {
+    ...roleAnalysisPrompt({ profile, knowledge, job, facts: companyFacts, compact, maxRequirements: compact ? 10 : MAX_REQUIREMENTS }),
+    schema: RoleAnalysisSchema,
+  });
+  const a = analysis.data;
   const renamed = new Map<string, string>();
-  const requirements = data.requirements.slice(0, MAX_REQUIREMENTS).map((r, i): JobRequirement => {
+  const requirements = a.requirements.slice(0, MAX_REQUIREMENTS).map((r, i): JobRequirement => {
     const id = `R${i + 1}`;
     if (!renamed.has(r.id)) renamed.set(r.id, id);
     return {
@@ -112,9 +120,35 @@ async function buildInsights(env: Env, ctx: Context, inputsHash: string): Promis
       employerTerms: r.employer_terms.map((t) => t.trim()).filter(Boolean),
     };
   });
+  const text = plainText(job.description);
+  const role: RoleAnalysis = {
+    coreProblems: a.role.core_problems.map((p) => p.trim()).filter(Boolean),
+    internScope: a.role.intern_scope.trim(),
+    // Signals must point at a real phrase in the posting.
+    implicitSignals: a.role.implicit_signals
+      .filter((s) => s.signal.trim() && quoteAppears(s.posting_phrase, text))
+      .map((s) => ({ signal: s.signal.trim(), quote: s.posting_phrase.trim() })),
+    companySignals: companySignals(job.company),
+  };
+  const roleSummary = a.role_summary.trim();
+
+  // 2. Retrieve the closest real experiences per requirement by meaning (open embeddings).
+  let retrieval: Retrieval[] | null = null;
+  try {
+    retrieval = await retrieveEvidence(env, requirements, knowledge.evidence);
+  } catch (err) {
+    console.warn(JSON.stringify({ message: "insights.retrieval_failed", jobId: job.id, error: String(err) }));
+  }
+
+  // 3. Judge which evidence demonstrates each requirement, and why.
+  const judged = await generateJson(env, {
+    ...evidenceJudgePrompt({ profile, knowledge, job, requirements, role: { role, roleSummary }, retrieval, compact }),
+    schema: EvidenceJudgeSchema,
+  });
+  const j = judged.data;
   const matches = validateMatches(
     requirements,
-    data.matches.map((m) => ({ ...m, requirement_id: renamed.get(m.requirement_id) ?? m.requirement_id })),
+    j.matches.map((m) => ({ ...m, requirement_id: renamed.get(m.requirement_id) ?? m.requirement_id })),
     knowledge.byId,
   );
 
@@ -126,30 +160,33 @@ async function buildInsights(env: Env, ctx: Context, inputsHash: string): Promis
       const strength = matches.find((m) => m.requirementId === r.id)?.strength;
       return (strength === "gap" || strength === "weak") && (r.kind === "required" || r.importance >= 3);
     })
-    .sort((a, b) => b.importance - a.importance)
+    .sort((x, y) => y.importance - x.importance)
     .map((r) => r.text);
 
   return {
     version: INSIGHTS_VERSION,
-    roleSummary: data.role_summary.trim(),
-    companyContext: data.company_context.trim(),
+    role,
+    matching: retrieval ? "semantic" : "llm",
+    retrieval: retrieval ?? undefined,
+    roleSummary,
+    companyContext: a.company_context.trim(),
     requirements,
     matches,
     strategy: {
-      targetRole: data.strategy.target_role.trim(),
-      topHiringSignals: data.strategy.top_hiring_signals.map((s) => s.trim()).filter(Boolean),
-      strongestEvidence: labels(data.strategy.strongest_evidence),
-      secondaryEvidence: labels(data.strategy.secondary_evidence),
-      deemphasize: labels(data.strategy.deemphasize),
+      targetRole: j.strategy.target_role.trim(),
+      topHiringSignals: j.strategy.top_hiring_signals.map((x) => x.trim()).filter(Boolean),
+      strongestEvidence: labels(j.strategy.strongest_evidence),
+      secondaryEvidence: labels(j.strategy.secondary_evidence),
+      deemphasize: labels(j.strategy.deemphasize),
       importantGaps,
-      cvStrategy: data.strategy.cv_strategy.trim(),
-      coverLetterAngle: data.strategy.cover_letter_angle.trim(),
+      cvStrategy: j.strategy.cv_strategy.trim(),
+      coverLetterAngle: j.strategy.cover_letter_angle.trim(),
     },
     companyFacts,
     research: companyFacts.length ? "web" : "posting",
-    concerns: data.concerns.map((c) => c.trim()).filter(Boolean),
+    concerns: a.concerns.map((c) => c.trim()).filter(Boolean),
     evidence: knowledge.evidence,
-    generator,
+    generator: judged.generator,
     createdAt: nowIso(),
     inputsHash,
   };

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { AiError } from "./ai/provider";
-import { runDiscovery } from "./discovery/run";
+import { runScheduledRefresh } from "./discovery/refresh";
 import { hasValidSession } from "./lib/auth";
 import type { AppEnv } from "./lib/validate";
 import { runDeadlineReminders } from "./notifications";
@@ -62,6 +62,6 @@ export default {
   fetch: app.fetch,
   async scheduled(controller, env) {
     if (controller.cron === DEADLINE_CRON) await runDeadlineReminders(env);
-    else await runDiscovery(env, { trigger: "cron" });
+    else await runScheduledRefresh(env, { trigger: "cron" });
   },
 } satisfies ExportedHandler<Env>;

@@ -7,6 +7,8 @@ import { deadlineLabel, formatDate, KIND_LABELS, relativeTime, SOURCE_LABELS, WO
 import { invalidate, useAction, useResource } from "../lib/hooks";
 import { ErrorState, Loading, Markdown, MatchRing } from "./common";
 import { Icon, Spinner } from "./Icon";
+import { EligibilitySection, jobCanGenerate } from "./Eligibility";
+import { ModelPicker, useModelChoice } from "./ModelPicker";
 import { MenuButton } from "./Menu";
 import { InsightsView } from "./Personalization";
 import { Sheet } from "./Sheet";
@@ -74,17 +76,23 @@ export function JobDetailView({
     toast.show("Stopped tracking");
   }, toast.error);
 
+  const modelChoice = useModelChoice();
+
   async function generate(kind: Exclude<Generating, null>, options: { questions?: string[]; angle?: string } = {}) {
     if (!job) return;
     setGenerating(kind);
     try {
       if (kind === "insights") {
-        const insights = await api.analyzeRole(jobId);
+        const insights = await api.analyzeRole(jobId, modelChoice.model);
         mutate({ ...job, insights, insightsStale: false });
         invalidate("events");
       } else {
         const doc =
-          kind === "tailored_cv" ? await api.tailorCv(jobId) : kind === "cover_letter" ? await api.coverLetter(jobId, options.angle) : await api.answers(jobId, options.questions);
+          kind === "tailored_cv"
+            ? await api.tailorCv(jobId, modelChoice.model)
+            : kind === "cover_letter"
+              ? await api.coverLetter(jobId, options.angle, modelChoice.model)
+              : await api.answers(jobId, options.questions, modelChoice.model);
         invalidateTracking(jobId);
         invalidate("documents");
         navigate(`/documents/${doc.id}`);
@@ -100,6 +108,19 @@ export function JobDetailView({
 
   const app = job.application;
   const canGenerate = overview?.hasMasterCv !== false;
+  // Tailoring is only for postings that passed the eligibility check (or that you approved after checking).
+  const eligible = jobCanGenerate(job);
+  const notEligible = (
+    <div className="row">
+      <span className="row-main row-subtitle">
+        {job.eligibilityStatus === "CHECK_MANUALLY"
+          ? "Check where this role can be done from, then approve it above to tailor documents."
+          : job.eligibilityStatus === "UNCLASSIFIED"
+            ? "This posting hasn't been through the eligibility check yet."
+            : "This posting is outside the places you can work from, so documents aren't generated. Change its status above if that's wrong."}
+      </span>
+    </div>
+  );
   const workplace = WORKPLACE_LABELS[job.workplace];
 
   return (
@@ -228,6 +249,8 @@ export function JobDetailView({
             {job.department && <Fact label="Team">{job.department}</Fact>}
           </dl>
 
+          <EligibilitySection job={job} onChanged={() => void reload()} />
+
           <MatchSection job={job} />
 
           <section className="section">
@@ -243,6 +266,8 @@ export function JobDetailView({
               <Progress label="Reading what the posting is really evaluating, researching the company and mapping your evidence to each requirement. This can take a couple of minutes." />
             ) : job.insights ? (
               <InsightsView insights={job.insights} stale={job.insightsStale} disabled={generating !== null} onRefresh={() => void generate("insights")} />
+            ) : !eligible ? (
+              <div className="group">{notEligible}</div>
             ) : (
               <div className="group row">
                 <div className="row-main">
@@ -266,6 +291,7 @@ export function JobDetailView({
             <div className="section-header">
               <h2 className="section-title">Application Materials</h2>
             </div>
+            {eligible && canGenerate && <ModelPicker choice={modelChoice} disabled={generating !== null} />}
             {generating && generating !== "insights" && (
               <div style={{ marginBottom: 12 }}>
                 <Progress label={GENERATING_LABELS[generating]} />
@@ -291,7 +317,9 @@ export function JobDetailView({
                   </span>
                 </Link>
               ))}
-              {!canGenerate ? (
+              {!eligible ? (
+                notEligible
+              ) : !canGenerate ? (
                 <div className="row">
                   <span className="row-main row-subtitle">Add your master CV to generate a tailored CV, cover letter and answers.</span>
                   <Link className="btn btn-sm" to="/documents">

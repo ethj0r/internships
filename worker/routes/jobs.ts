@@ -3,13 +3,13 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { importFromUrl, ImportError, manualJob } from "../discovery/import";
 import { ingestJob, loadMatchContext, rescoreAll } from "../discovery/run";
+import { withModel } from "../ai/provider";
 import { analyzeJob } from "../documents/generate";
 import { insightsState } from "../personalization/insights";
 import {
   DOCUMENT_SUMMARY_SELECT,
   eventStmt,
   getJobDetailRow,
-  getProfile,
   JOB_SUMMARY_SELECT,
   nowIso,
   parseJson,
@@ -19,7 +19,10 @@ import {
   type DocumentRow,
   type JobRow,
 } from "../lib/db";
-import { scopeFilter } from "../lib/scope";
+import { visibleFilter } from "../lib/scope";
+import { ELIGIBILITY_STATUSES, STATUS_ORDER, type Eligibility } from "../../shared/eligibility";
+import type { ShortlistGroup } from "../../shared/types";
+import { eligibilityUpdateStmt, reclassifyJob } from "../eligibility/classify";
 import { idParam, notFound, readJson, type AppEnv } from "../lib/validate";
 
 export const jobs = new Hono<AppEnv>();
@@ -44,13 +47,23 @@ jobs.get("/", async (c) => {
     default: // inbox: open, untracked, not dismissed, not a duplicate
       where.push("a.id IS NULL", "j.dismissed_at IS NULL", "j.closed_at IS NULL", "j.duplicate_of IS NULL");
   }
-  // Tracked and hidden jobs stay visible whatever the search area.
-  if (q.view !== "tracked" && q.view !== "dismissed") {
-    const scope = scopeFilter((await getProfile(c.env.DB)).searchScope);
-    if (scope) {
-      where.push(scope.sql);
-      params.push(...scope.params);
-    }
+  // Eligibility: one status, "eligible" (every status that can be applied for), or all but excluded by default.
+  // Tracked and hidden jobs stay visible whatever their status.
+  if (q.eligibility && (ELIGIBILITY_STATUSES as readonly string[]).includes(q.eligibility)) {
+    where.push("j.eligibility_status = ?");
+    params.push(q.eligibility);
+  } else if (q.eligibility === "eligible") {
+    where.push("j.eligibility_status IN ('ELIGIBLE_REMOTE', 'ELIGIBLE_INDONESIA', 'ELIGIBLE_SINGAPORE')");
+  } else if (q.view !== "tracked" && q.view !== "dismissed") {
+    where.push(visibleFilter().sql);
+  }
+  if (q.tier && /^[1-4]$/.test(q.tier)) {
+    where.push("j.priority_tier <= ?");
+    params.push(Number(q.tier));
+  }
+  if (q.season) {
+    where.push("j.season = ?");
+    params.push(q.season);
   }
   if (q.region === "indonesia") where.push("j.region = 'indonesia'");
   else if (q.region === "asia") where.push("j.region IN ('asia', 'remote_asia')");
@@ -76,11 +89,13 @@ jobs.get("/", async (c) => {
   if (q.hasDeadline === "1") where.push("j.deadline IS NOT NULL AND j.deadline >= date('now')");
 
   const order =
-    q.sort === "newest"
+    q.sort === "priority" || !q.sort
+      ? "j.priority_score DESC, j.first_seen_at DESC"
+      : q.sort === "newest"
       ? "j.first_seen_at DESC"
       : q.sort === "deadline"
         ? "j.deadline IS NULL, j.deadline ASC, j.match_score DESC"
-        : "j.match_score IS NULL, j.match_score DESC, j.first_seen_at DESC";
+        : "j.match_score IS NULL, j.match_score DESC, j.first_seen_at DESC"; // "score"
   const limit = Math.min(200, Math.max(1, Number(q.limit) || 100));
   const offset = Math.max(0, Number(q.offset) || 0);
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -132,8 +147,75 @@ jobs.post("/import", async (c) => {
     ? await db.prepare("SELECT id FROM sources WHERE kind = ? AND identifier = ?").bind(imported.kind, imported.identifier).first<{ id: number }>()
     : await db.prepare("SELECT id FROM sources WHERE kind = 'manual' LIMIT 1").first<{ id: number }>();
   const result = await ingestJob(db, imported.kind, source?.id ?? null, imported.raw, await loadMatchContext(db));
-  if (result.created) await eventStmt(db, "job", result.id, "imported", { via: "url" in body ? "url" : "manual" }).run();
+  if (result.created) {
+    await eventStmt(db, "job", result.id, "imported", { via: "url" in body ? "url" : "manual" }).run();
+    // A posting added by hand is classified right away, so it can be tailored without waiting for the cron.
+    await reclassifyJob(c.env, result.id).catch((err) => console.warn(JSON.stringify({ message: "eligibility.import_failed", error: String(err) })));
+  }
   return c.json(result, result.created ? 201 : 200);
+});
+
+/** The ranked shortlist, grouped by eligibility status: open, not hidden, not duplicates. */
+jobs.get("/shortlist", async (c) => {
+  const perGroup = Math.min(100, Math.max(1, Number(c.req.query("limit")) || 25));
+  const includeExcluded = c.req.query("excluded") === "1";
+  const statuses = STATUS_ORDER.filter((s) => includeExcluded || s !== "EXCLUDED");
+  const stmts = statuses.map((status) =>
+    c.env.DB.prepare(
+      `SELECT ${JOB_SUMMARY_SELECT} FROM jobs j LEFT JOIN applications a ON a.job_id = j.id
+       WHERE j.eligibility_status = ? AND j.closed_at IS NULL AND j.dismissed_at IS NULL AND j.duplicate_of IS NULL
+       ORDER BY j.priority_score DESC, j.first_seen_at DESC LIMIT ?`,
+    ).bind(status, perGroup),
+  );
+  const results = await c.env.DB.batch(stmts);
+  const groups: ShortlistGroup[] = statuses.map((status, i) => ({ status, jobs: (results[i]!.results as JobRow[]).map(toJobSummary) }));
+  return c.json(groups.filter((g) => g.jobs.length));
+});
+
+const EligibilityBody = z.union([
+  z.object({ action: z.literal("approve") }),
+  z.object({ action: z.literal("reclassify") }),
+  z.object({ action: z.literal("override"), status: z.enum(["ELIGIBLE_REMOTE", "ELIGIBLE_INDONESIA", "ELIGIBLE_SINGAPORE", "CHECK_MANUALLY", "EXCLUDED"]), note: z.string().trim().max(300).optional() }),
+]);
+
+/**
+ * approve: a CHECK_MANUALLY posting may go through generation. reclassify: run the rules and model again.
+ * override: the candidate knows better (e.g. a recruiter confirmed remote from Indonesia is fine).
+ */
+jobs.post("/:id/eligibility", async (c) => {
+  const id = idParam(c);
+  const body = await readJson(c, EligibilityBody);
+  const db = c.env.DB;
+  const row = await db.prepare("SELECT company, title, description, match_score, eligibility FROM jobs WHERE id = ?").bind(id).first<{
+    company: string;
+    title: string;
+    description: string;
+    match_score: number | null;
+    eligibility: string | null;
+  }>();
+  if (!row) throw notFound("Job");
+  if (body.action === "reclassify") {
+    await reclassifyJob(c.env, id);
+    return c.json({ ok: true });
+  }
+  const current = parseJson<Eligibility | null>(row.eligibility, null);
+  if (!current) throw new HTTPException(409, { message: "This posting hasn't been classified yet. Reclassify it first." });
+  const job = { company: row.company, title: row.title, description: row.description, matchScore: row.match_score };
+  let next: Eligibility;
+  if (body.action === "approve") {
+    if (current.status !== "CHECK_MANUALLY") throw new HTTPException(409, { message: "Only postings marked Check manually need approval." });
+    next = { ...current, approvedAt: nowIso() };
+  } else {
+    next = {
+      ...current,
+      status: body.status,
+      reason: `Set manually${body.note ? `: ${body.note}` : "."} (was: ${current.reason})`,
+      classifier: "rules",
+      approvedAt: body.status === "CHECK_MANUALLY" ? nowIso() : null,
+    };
+  }
+  await db.batch([eligibilityUpdateStmt(db, id, next, job), eventStmt(db, "job", id, `eligibility_${body.action}`, { status: next.status })]);
+  return c.json({ ok: true });
 });
 
 jobs.post("/rescore", async (c) => c.json({ updated: await rescoreAll(c.env) }));
@@ -199,4 +281,7 @@ jobs.patch("/:id", async (c) => {
   return c.json(toJobDetail(row!, [], []));
 });
 
-jobs.post("/:id/insights", async (c) => c.json(await analyzeJob(c.env, idParam(c))));
+jobs.post("/:id/insights", async (c) => {
+  const { model } = await readJson(c, z.object({ model: z.string().max(80).optional() }));
+  return c.json(await analyzeJob(withModel(c.env, model), idParam(c)));
+});

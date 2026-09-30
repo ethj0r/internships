@@ -27,6 +27,7 @@ function toRaw(company: string, j: GreenhouseJob): RawJob {
     applyUrl: j.absolute_url,
     descriptionHtml: j.content,
     postedAt: j.first_published ?? j.updated_at ?? null,
+    updatedAt: j.updated_at ?? null,
   };
 }
 

@@ -73,6 +73,36 @@ const SCOPE_CLAIMS: [RegExp, RegExp][] = [
   [/\b(?:supervis\w*|oversaw|oversee\w*)\b/i, /\b(?:supervis\w*|oversaw|oversee\w*|manag\w*|director|head|lead\w*)\b/i],
 ];
 
+/** Clauses that tell the reader what a bullet proves instead of letting the work show it. */
+const SELF_ASSESSMENT = /(?:,\s*|\bby\s+|\bthus\s+|\bthereby\s+)(?:demonstrat|showcas|highlight|reflect|underscor|illustrat|prov|exhibit|display)\w*\b|\b(?:ability|abilities|capacity|eagerness|willingness) to (?:learn|adapt|apply|work|grow)\b|\bexpertise in\b|\bstrong (?:problem[- ]solving|analytical|communication) skills\b/i;
+
+/**
+ * The concrete details of a bullet: technologies, numbers, and acronyms or proper names inside the sentence
+ * (BFS, DOM, MTTR, ConcordeOS). A rewrite that loses most of them has become vaguer, whatever it gained.
+ */
+export function specifics(text: string): Set<string> {
+  const lower = text.toLowerCase();
+  const literal = (t: string) => new RegExp(`(?<![a-z0-9])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9])`).test(lower);
+  // Canonical skill names only count when written as such ("CI pipelines" implies CI/CD but doesn't say it).
+  const out = new Set<string>(extractSkills(text).map((x) => x.toLowerCase()).filter(literal));
+  for (const m of text.matchAll(/\b\d[\d.,+%]*\b/g)) out.add(m[0].toLowerCase());
+  const words = text.replace(/[()*,.;:]/g, " ").split(/\s+/).filter(Boolean);
+  words.forEach((w, i) => {
+    if (i === 0) return; // sentence-initial capital
+    if (/^[A-Z][A-Za-z0-9]*[A-Z0-9][A-Za-z0-9]*$/.test(w) || /^[A-Z]{2,}s?$/.test(w)) out.add(w.toLowerCase());
+  });
+  return out;
+}
+
+/** Share of the original's specifics that survive in the rewrite (1 when the original has none). */
+export function detailRetention(original: string, rewrite: string): { kept: number; lost: string[] } {
+  const before = specifics(original);
+  if (!before.size) return { kept: 1, lost: [] };
+  const after = rewrite.toLowerCase();
+  const lost = [...before].filter((t) => !new RegExp(`(?<![a-z0-9])${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9])`).test(after));
+  return { kept: 1 - lost.length / before.size, lost };
+}
+
 export interface BulletCheck {
   /** Unsupported claims: the rewrite is rejected and the original bullet is kept. */
   blocking: string[];
@@ -97,6 +127,9 @@ export function checkBullet(bullet: string, support: EvidenceItem[], originalLen
     const m = bullet.match(claim);
     if (m && !required.test(text)) blocking.push(`Says “${m[0]}”, but this entry's evidence doesn't show that scope.`);
   }
+
+  const selfAssessment = bullet.match(SELF_ASSESSMENT);
+  if (selfAssessment) blocking.push(`Tells the reader what it proves (“${selfAssessment[0].replace(/^[,\s]+/, "")}”) instead of showing the work.`);
 
   const generic = findGenericPhrases(bullet);
   if (generic.length) warnings.push(`Uses filler: ${listText(generic)}.`);
@@ -146,6 +179,11 @@ export function applyBulletProposals(input: {
     const text = p.text.trim();
 
     const result = checkBullet(plain(text), facts, Math.max(0, ...originals.map((o) => plain(o).length)));
+    // Merging bullets naturally drops some detail, so the bar is lower for merges.
+    const retention = detailRetention(originals.map((o) => plain(o)).join(" "), plain(text));
+    if (originals.length && retention.kept < (originals.length > 1 ? 0.4 : 0.6)) {
+      result.blocking.push(`Drops concrete detail from your bullet (${listText(retention.lost.slice(0, 5))}), which makes it vaguer.`);
+    }
     if (foreign.length) result.blocking.unshift(`Cites evidence from outside this entry (${foreign.join(", ")}).`);
     if (!basis.some((id) => !id.endsWith(".h"))) result.blocking.push("Doesn't trace to any of this entry's facts.");
 

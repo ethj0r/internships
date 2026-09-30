@@ -1,10 +1,11 @@
-// Prompts and output schemas for evidence-based personalization (docs/personalization.md).
+// Output schemas and the context blocks prompts are assembled from. The instructions themselves live in
+// worker/prompts/*.md so they can be edited without touching code (see worker/prompts/index.ts).
 //
 // Every step sees the candidate's knowledge base with evidence ids and must cite them. The Worker validates
 // every citation (worker/personalization/validate.ts) before anything reaches a document.
 
 import { z } from "zod";
-import { plain, isAlwaysIncluded } from "../../shared/cv";
+import { isAlwaysIncluded, plain } from "../../shared/cv";
 import {
   COVER_LETTER_CRITERIA,
   CV_CRITERIA,
@@ -13,29 +14,45 @@ import {
   STRENGTH_LABELS,
   type CompanyFact,
   type JobInsights,
+  type JobRequirement,
   type LetterPlan,
   type QualityIssue,
 } from "../../shared/personalization";
+import { findCompany } from "../../shared/priority";
 import { ROLE_LABELS } from "../../shared/roles";
 import type { JobDetail, Profile } from "../../shared/types";
+import { LETTER_RULES, bannedForPrompt } from "../letters/lint";
 import { truncate } from "../lib/text";
 import { knowledgeForPrompt, type Knowledge } from "../personalization/knowledge";
+import type { Retrieval } from "../personalization/semantic";
+import { block, render, type Rendered } from "../prompts";
 
 // ---------- Schemas ----------
 
-export const InsightsSchema = z.object({
-  requirements: z.array(
-    z.object({
-      id: z.string(),
-      text: z.string(),
-      kind: z.enum(REQUIREMENT_KINDS),
-      importance: z.number(),
-      competencies: z.array(z.string()),
-      why_it_matters: z.string(),
-      convincing_evidence: z.string(),
-      employer_terms: z.array(z.string()),
-    }),
-  ),
+const RequirementSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  kind: z.enum(REQUIREMENT_KINDS),
+  importance: z.number(),
+  competencies: z.array(z.string()),
+  why_it_matters: z.string(),
+  convincing_evidence: z.string(),
+  employer_terms: z.array(z.string()),
+});
+
+export const RoleAnalysisSchema = z.object({
+  requirements: z.array(RequirementSchema),
+  role: z.object({
+    core_problems: z.array(z.string()),
+    intern_scope: z.string(),
+    implicit_signals: z.array(z.object({ signal: z.string(), posting_phrase: z.string() })),
+  }),
+  role_summary: z.string(),
+  company_context: z.string(),
+  concerns: z.array(z.string()),
+});
+
+export const EvidenceJudgeSchema = z.object({
   matches: z.array(
     z.object({ requirement_id: z.string(), strength: z.enum(EVIDENCE_STRENGTHS), evidence_ids: z.array(z.string()), rationale: z.string(), cv_action: z.string() }),
   ),
@@ -48,9 +65,6 @@ export const InsightsSchema = z.object({
     cv_strategy: z.string(),
     cover_letter_angle: z.string(),
   }),
-  role_summary: z.string(),
-  company_context: z.string(),
-  concerns: z.array(z.string()),
 });
 
 /** Choices applied to a LaTeX master CV: entries, bullet rewrites with their evidence, skill order. */
@@ -84,21 +98,39 @@ export const FullCvSchema = z.object({
   changes: z.array(z.object({ section: z.string(), change: z.string(), reason: z.string() })),
 });
 
+export const CvVerifySchema = z.object({
+  bullets: z.array(
+    z.object({
+      bullet_id: z.string(),
+      claims: z.array(z.object({ claim: z.string(), support: z.enum(["supported", "partial", "unsupported"]), evidence_ids: z.array(z.string()), problem: z.string() })),
+    }),
+  ),
+});
+
 export const LetterPlanSchema = z.object({
   company_need: z.string(),
   why_role: z.string(),
   why_company: z.string(),
   company_fact_ids: z.array(z.string()),
+  opening: z.string(),
   narrative: z.array(
     z.object({ need: z.string(), experience: z.string(), why_it_matters: z.string(), requirement_ids: z.array(z.string()), evidence_ids: z.array(z.string()) }),
   ),
   contribution: z.string(),
   motivation: z.string(),
+  location_sentence: z.string(),
 });
 
 export const LetterSchema = z.object({
   letter_markdown: z.string(),
   claims: z.array(z.object({ claim: z.string(), evidence_ids: z.array(z.string()), company_fact_ids: z.array(z.string()) })),
+});
+
+export const LetterCritiqueSchema = z.object({
+  flags: z.array(z.object({ quote: z.string(), problem: z.string(), fix: z.string() })),
+  strongest_line: z.string(),
+  verdict: z.enum(["send", "revise"]),
+  summary: z.string(),
 });
 
 const reviewSchema = <C extends readonly [string, ...string[]]>(criteria: C) =>
@@ -117,36 +149,11 @@ export const AnswersSchema = z.object({
   project_explanations: z.array(z.object({ project: z.string(), explanation: z.string() })),
 });
 
-// ---------- Shared guidance ----------
+// ---------- Shared blocks ----------
 
-/** What strong applications do, distilled from recruiter and hiring-manager sources (docs/personalization.md). */
-const CV_PRINCIPLES = `How strong software engineering CVs read:
-- A recruiter decides in seconds whether to keep reading. The strongest evidence for this role has to be visible first: in which entries lead, which bullets lead each entry, and the first words of each bullet.
-- Accomplishments, not responsibilities. A bullet says what was built or solved, in what technical context, with which decisions, and what came of it: action → technical context → problem → result. "Accomplished X, as measured by Y, by doing Z" only when a real measure exists in the evidence.
-- Technologies appear where they were used, in context, rather than as keywords.
-- Tailoring is selection and emphasis, not vocabulary swapping. Lead with what proves fit, compress or drop what doesn't, and use the employer's term only where it accurately names the candidate's work (if they built CI/CD pipelines, say "CI/CD"; never add a tool they haven't used).
-- Specific beats impressive-sounding. Vague claims about teamwork or passion persuade no one.`;
-
-const LETTER_PRINCIPLES = `What makes a cover letter worth reading:
-- It isn't the CV in paragraphs. It gives the context a CV can't: why this role and this team, how the candidate's path leads here, what they learned or built that matters for this work, and what they can realistically contribute.
-- It builds one chain of reasoning: the team's need → a problem the candidate has actually faced → what they built or learned → why that matters here → why this role specifically.
-- Company-specific means things a reader at the company would recognize as true, from the posting or cited research. Never pretend to know internal teams, systems, culture or plans.
-- Motivation must be the candidate's own. Use their notes about interests and motivation, or what they asked the letter to reflect. Otherwise don't invent feelings: write a bracketed placeholder such as [Add a sentence on what draws you to payments infrastructure] for them to fill in.
-- Plain, confident, specific sentences. No filler ("I am passionate about", "I am excited to apply", "fast-paced", "leverage", "proven track record", "team player", "cutting-edge") and no opening that just announces the application.
-- 250–350 words in three or four paragraphs.`;
-
-const GROUNDING_RULES = `Ground rules. These override every other instruction:
-- The knowledge base is the only source of facts about the candidate, and every claim must trace to its evidence ids.
-- Never invent or embellish employers, dates, titles, projects, metrics, technologies, scale, users, results or responsibilities.
-- Never claim a technology or practice because the job asks for it. If the evidence doesn't show it, it's a gap: name it where asked, and keep it out of documents.
-- Never inflate scope. "Contributed to" stays "contributed to"; "led", "owned", "architected" and "managed" need evidence that says so.
-- Never add numbers the evidence doesn't contain, and don't force metrics into bullets.
-- Items marked "candidate's note" are the candidate's own statements and count as evidence.`;
-
-const TEMPLATE_NOTE =
-  "The CV is typeset with the candidate's fixed LaTeX résumé template. You only choose and reword content: layout, section titles, organizations, roles, dates, locations, headings and contact details come from the master CV automatically.";
-
-// ---------- Blocks ----------
+const grounding = () => block("grounding_rules");
+const cvPrinciples = () => block("cv_principles");
+export const letterStyle = () => block("letter_style", { minWords: LETTER_RULES.minWords, maxWords: LETTER_RULES.maxWords, banned: bannedForPrompt() });
 
 function profileBlock(p: Profile): string {
   const lines = [
@@ -156,9 +163,15 @@ function profileBlock(p: Profile): string {
     p.graduationDate && `Expected graduation: ${p.graduationDate}`,
     p.location && `Location: ${p.location}`,
     p.targetRoles.length && `Target roles: ${p.targetRoles.map((r) => ROLE_LABELS[r] ?? r).join(", ")}`,
-    p.workAuthorization && `Work authorization: ${p.workAuthorization}`,
   ].filter(Boolean);
   return `<candidate_profile>\n${lines.join("\n")}\n</candidate_profile>`;
+}
+
+function candidateBasics(p: Profile, k: Knowledge): string {
+  const education = p.education || k.evidence.find((e) => e.section.toLowerCase().includes("education"))?.label || "";
+  return [education && `Education: ${education}`, p.graduationDate && `Expected graduation: ${p.graduationDate}`, `Based in: ${p.location || "Bandung, Indonesia"} (UTC+7)`]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function knowledgeBlock(k: Knowledge, compact: boolean): string {
@@ -176,12 +189,79 @@ function jobBlock(job: JobDetail, compact: boolean): string {
   return `<job_posting>\n${header}\n\n${compact ? truncate(job.description, 9_000) : job.description}\n</job_posting>`;
 }
 
+/** The posting's header only, for steps that already have the role analysis (saves the full posting's tokens). */
+function jobHeaderBlock(job: JobDetail): string {
+  const header = [`Company: ${job.company}`, `Title: ${job.title}`, job.department && `Team: ${job.department}`, job.location && `Location: ${job.location}`, job.duration && `Duration: ${job.duration}`]
+    .filter(Boolean)
+    .join("\n");
+  return `<job_posting>\n${header}\n(The full posting has been analysed; its requirements and employer terms are in the role analysis.)\n</job_posting>`;
+}
+
+/** CV entries that matter for this role (cited in the evidence map or retrieved for a requirement), plus every note. */
+function relevantKnowledgeBlock(k: Knowledge, insights: JobInsights): string {
+  const ids = new Set([...insights.matches.flatMap((m) => m.evidenceIds), ...(insights.retrieval ?? []).flatMap((r) => r.candidates.slice(0, 3).map((c) => c.id))]);
+  const groups = new Set(k.evidence.filter((e) => ids.has(e.id)).map((e) => e.group));
+  const kept = k.evidence.filter((e) => groups.has(e.group) || e.kind === "note");
+  const byGroup = new Map<string, typeof kept>();
+  for (const e of kept) byGroup.set(e.group, [...(byGroup.get(e.group) ?? []), e]);
+  const lines: string[] = [];
+  for (const [group, items] of byGroup) {
+    lines.push(`[${group}] ${items[0]!.section}: ${items[0]!.label}`);
+    for (const e of items) lines.push(`  ${e.id}${e.kind === "note" ? " (candidate's note)" : ""}: ${e.text}`);
+  }
+  return `<knowledge_base>
+The candidate's experience relevant to this role, grouped by CV entry (other entries were judged irrelevant). Cite evidence by id.
+${lines.join("\n")}
+</knowledge_base>`;
+}
+
+/** One line per CV entry, for the judge to spot evidence retrieval missed without reading everything. */
+function knowledgeIndex(k: Knowledge): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const e of k.evidence) {
+    if (seen.has(e.group)) continue;
+    seen.add(e.group);
+    const heading = k.evidence.find((x) => x.group === e.group && x.kind === "heading");
+    const bullets = k.evidence.filter((x) => x.group === e.group && x.kind !== "heading").map((x) => x.id);
+    lines.push(`[${e.group}] ${e.section}: ${e.label}${heading ? ` (${heading.id})` : ""}. Evidence ids: ${bullets.join(", ") || "none"}`);
+  }
+  return lines.join("\n");
+}
+
 function factsBlock(facts: CompanyFact[]): string {
   if (!facts.length) return "<company_research>\nNo verified research is available. Use only the job posting for facts about the company.\n</company_research>";
   return `<company_research>
 Facts from public sources. Beyond the job posting, these are the only facts about the company you may use.
 ${facts.map((f) => `${f.id}: ${f.text} (${f.sources.map((s) => s.url).join(", ")})`).join("\n")}
 </company_research>`;
+}
+
+/** What this company's interviewers tend to weigh (config/companies.json). Steers selection; never quoted. */
+export function companySignals(company: string): string[] {
+  return findCompany(company)?.signals ?? [];
+}
+
+function companySignalsBlock(company: string): string {
+  const signals = companySignals(company);
+  if (!signals.length) return "";
+  return `<company_signals>
+What interviewers at ${findCompany(company)!.name} tend to weigh, from the candidate's own notes. Use it only to decide which real experiences to put forward. Never quote these words, name company values, or describe the candidate with them.
+${signals.map((s) => `- ${s}`).join("\n")}
+</company_signals>`;
+}
+
+function roleBlock(insights: Pick<JobInsights, "role" | "roleSummary">): string {
+  const r = insights.role;
+  if (!r) return insights.roleSummary;
+  return [
+    insights.roleSummary,
+    r.coreProblems.length && `Core problems: ${r.coreProblems.join("; ")}`,
+    r.internScope && `Intern scope: ${r.internScope}`,
+    r.implicitSignals.length && `Implicit signals: ${r.implicitSignals.map((s) => `${s.signal} (“${s.quote}”)`).join("; ")}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function analysisBlock(insights: JobInsights): string {
@@ -195,7 +275,7 @@ function analysisBlock(insights: JobInsights): string {
   });
   return `<role_analysis>
 Target role: ${s.targetRole}
-${insights.roleSummary}
+${roleBlock(insights)}
 Top hiring signals: ${s.topHiringSignals.join("; ")}
 Strongest evidence: ${s.strongestEvidence.join("; ") || "none"}
 Secondary evidence: ${s.secondaryEvidence.join("; ") || "none"}
@@ -223,73 +303,62 @@ function candidateName(profile: Profile, k: Knowledge): string {
 
 // ---------- Company research ----------
 
-export function researchPrompt(job: JobDetail) {
-  return {
-    system:
-      "You research a company for a student's internship application. Report only what public sources say, and cite them. Never guess about internal teams, systems, culture or plans.",
-    prompt: `Company: ${job.company}
-Role: ${job.title}${job.department ? `\nTeam: ${job.department}` : ""}${job.location ? `\nLocation: ${job.location}` : ""}
-Posting: ${job.url}
-
-Posting excerpt:
-${truncate(job.description, 3_000)}
-
-Find what a well-prepared applicant would genuinely know:
-- what the company builds and for whom
-- the product, team or domain this role supports, where public
-- engineering challenges, engineering blog posts or talks related to this role's work
-- technical developments from the last two years
-- stated values or product principles
-
-Write 4–10 findings. Each finding is its own paragraph of one or two sentences, stated as fact and supported by a source. Leave out anything you can't verify. If several companies share this name, use the posting to identify the right one; if you still can't, say so in one sentence and stop.`,
-  };
+export function researchPrompt(job: JobDetail): Rendered {
+  return render("research", {
+    company: job.company,
+    title: job.title,
+    team: job.department ? `\nTeam: ${job.department}` : "",
+    location: job.location ? `\nLocation: ${job.location}` : "",
+    url: job.url,
+    excerpt: truncate(job.description, 3_000),
+  });
 }
 
 // ---------- Job insights ----------
 
-export function insightsPrompt(input: { profile: Profile; knowledge: Knowledge; job: JobDetail; facts: CompanyFact[]; compact: boolean }) {
-  const { profile, knowledge, job, facts, compact } = input;
-  return {
-    system: `You are an experienced technical recruiter working with an engineering hiring manager to prepare a student's application for one internship. You read a posting for what the team actually needs, and you judge fit only on evidence.\n\n${GROUNDING_RULES}`,
-    prompt: `${profileBlock(profile)}
+export function roleAnalysisPrompt(input: { profile: Profile; knowledge: Knowledge; job: JobDetail; facts: CompanyFact[]; compact: boolean; maxRequirements: number }): Rendered {
+  const { profile, knowledge, job, facts, compact, maxRequirements } = input;
+  return render("role_analysis", {
+    candidate_basics: candidateBasics(profile, knowledge),
+    job: jobBlock(job, compact),
+    facts: factsBlock(facts),
+    company_signals: companySignalsBlock(job.company),
+    max_requirements: maxRequirements,
+  });
+}
 
-${knowledgeBlock(knowledge, compact)}
+function candidatesBlock(requirements: JobRequirement[], retrieval: Retrieval[] | null, k: Knowledge): string {
+  return requirements
+    .map((r) => {
+      const found = retrieval?.find((x) => x.requirementId === r.id)?.candidates ?? [];
+      const lines = found.map((c) => {
+        const e = k.byId.get(c.id);
+        return e ? `  - ${c.id} (${c.score.toFixed(2)}) ${e.label}: ${e.text}` : "";
+      });
+      return `${r.id} [${r.kind}, importance ${r.importance}/5] ${r.text}\n  Competencies: ${r.competencies.join(", ")}\n${lines.filter(Boolean).join("\n") || "  (no close matches found; check the index)"}`;
+    })
+    .join("\n\n");
+}
 
-${jobBlock(job, compact)}
-
-${factsBlock(facts)}
-
-Analyze this role in three steps.
-
-1. requirements: what the employer is evaluating. Split the posting into its distinct requirements, at most ${compact ? 10 : 14}; merge near-duplicates and skip boilerplate such as equal-opportunity statements. Cover the whole posting, not only its requirements list: what the intern will actually do (responsibilities, such as making services reliable or writing tests) and signals about the team and product (context) often matter more to the hiring manager than the listed skills. For each:
-- id: R1, R2, … in order.
-- text: the requirement, close to the posting's wording.
-- kind: required (must-have), preferred (nice-to-have), responsibility (what the intern will do) or context (a signal about the team, product or way of working).
-- importance: 1–5, relative to the rest of this posting, judged by emphasis and the role's purpose rather than position.
-- competencies: the underlying competencies being evaluated. "Experience building scalable backend services" can imply API design, database design, performance, reliability, production ownership or distributed systems; list only what this posting implies.
-- why_it_matters: why this team needs it, in one sentence.
-- convincing_evidence: what would convince a hiring manager, in one sentence.
-- employer_terms: the posting's own terms for it, for reuse where they accurately describe the candidate's work.
-
-2. matches: one per requirement, judged on meaning rather than shared words. "Worked with designers, backend developers and project leads to ship a platform" is evidence of cross-functional collaboration without using that phrase, while a tool named only in a skills list is weaker evidence than having built something with it.
-- strength: strong (directly demonstrated), relevant (demonstrated by closely related experience), transferable (the underlying competency exists in a different context), weak (some indication, not enough proof), gap (no credible evidence) or unknown (the posting or the evidence is too vague to judge). Judge in both directions: evidence that explicitly shows the requirement being done in real work (e.g. "built CI/CD pipelines with GitHub Actions and Docker" for "familiarity with Docker and CI/CD") is strong, and adjacent experience is never strong.
-- evidence_ids: the specific evidence, strongest first. Empty for gap and unknown.
-- rationale: one or two sentences explaining the judgment and naming the experience.
-- cv_action: how the CV should use this, e.g. "Lead Concorde Systems with the schema and REST API bullet". For a gap: "Don't claim" and what, if anything, is adjacent and true.
-
-3. strategy:
-- target_role: the role as its hiring manager would describe it.
-- top_hiring_signals: the 3–5 things most likely to decide this hire.
-- strongest_evidence and secondary_evidence: evidence group ids (e.g. exp1, proj2), best first.
-- deemphasize: group ids that add little for this role.
-- cv_strategy: two or three sentences on what to emphasize, compress and leave out.
-- cover_letter_angle: the single connection between this team's need and the candidate's experience that a cover letter should build on.
-
-Also:
-- role_summary: two sentences on what the intern will actually do and for whom.
-- company_context: what the posting${facts.length ? " and the research" : ""} establish about the company, product or team. Don't infer internal details.
-- concerns: eligibility, location, timing or seniority risks. Empty if none.`,
-  };
+export function evidenceJudgePrompt(input: {
+  profile: Profile;
+  knowledge: Knowledge;
+  job: JobDetail;
+  requirements: JobRequirement[];
+  role: Pick<JobInsights, "role" | "roleSummary">;
+  retrieval: Retrieval[] | null;
+  compact: boolean;
+}): Rendered {
+  const { profile, knowledge, job, requirements, role, retrieval, compact } = input;
+  return render("evidence_judge", {
+    grounding_rules: grounding(),
+    profile: profileBlock(profile),
+    role: roleBlock(role),
+    company_signals: companySignalsBlock(job.company),
+    candidates: candidatesBlock(requirements, retrieval, knowledge),
+    // With retrieval, the candidates carry the text and a one-line-per-entry index is enough to spot misses.
+    knowledge_index: retrieval ? knowledgeIndex(knowledge) : compact ? truncate(knowledgeForPrompt(knowledge), 12_000) : knowledgeForPrompt(knowledge),
+  });
 }
 
 // ---------- Tailored CV ----------
@@ -314,71 +383,53 @@ function cvForTailoring(k: Knowledge): string {
   return lines.join("\n");
 }
 
-export function tailorCvPrompt(input: { profile: Profile; knowledge: Knowledge; job: JobDetail; insights: JobInsights; compact: boolean; feedback: string[] }) {
-  const { profile, knowledge, job, insights, compact, feedback } = input;
-  return {
-    system: `You tailor a student's CV for one internship the way a strong candidate who understands the role would. ${TEMPLATE_NOTE}\n\n${CV_PRINCIPLES}\n\n${GROUNDING_RULES}`,
-    prompt: `${profileBlock(profile)}
+interface CvInput {
+  profile: Profile;
+  knowledge: Knowledge;
+  job: JobDetail;
+  insights: JobInsights;
+  compact: boolean;
+  feedback: string[];
+}
 
-<master_cv>
-Entries with their numbered bullets, each bullet's evidence id in brackets, and any notes the candidate added.
-${cvForTailoring(knowledge)}
-</master_cv>
-
-${jobBlock(job, compact)}
-
-${analysisBlock(insights)}${feedbackBlock(feedback)}
-
-Tailor the CV to the role analysis.
-
-entries: the entries to include, with their exact ids, most relevant to this role first within each section. List every entry of a section marked always_included. Keep the CV substantial: all experience and the projects with the strongest evidence.
-- bullets: the entry's bullets for this role, strongest evidence for this role first, at most as many as the entry has. Normally include every master bullet, rewritten or copied; master bullets you neither use nor drop are kept after yours, unchanged.
-  - text: the bullet. Rewrite only where the same facts can be presented more relevantly: lead with what matters for this role, keep the technical context and whatever result the evidence gives, and use the employer's term where it accurately names the work. If a bullet already does this, copy it exactly. Keep a similar length, and put **double asterisks** around key technologies and outcomes as the master does.
-  - from: the numbers of the master bullets this bullet is based on, usually one.
-  - evidence_ids: the ids of this entry's evidence the bullet's facts come from, including this entry's candidate's notes. Never use another entry's evidence.
-  - requirement_ids: the requirements this bullet gives evidence for.
-  - reason: one sentence on why this bullet is written and placed this way for this role.
-- drop: master bullets (by number) to leave out because they add little for this role, each with a one-sentence reason tied to the role. Drop only when it sharpens the CV, and never drop evidence for a top hiring signal. Usually empty.
-omit: entries you leave out, each with a one-sentence reason tied to the role.
-skills: for each skill line, its label and its items, most relevant to this role first. Only items already in that line.`,
-  };
+export function tailorCvPrompt({ profile, knowledge, job, insights, feedback }: CvInput): Rendered {
+  return render("cv_tailor", {
+    cv_principles: cvPrinciples(),
+    grounding_rules: grounding(),
+    profile: profileBlock(profile),
+    master_cv: cvForTailoring(knowledge),
+    job: jobHeaderBlock(job),
+    analysis: analysisBlock(insights),
+    company_signals: companySignalsBlock(job.company),
+    feedback: feedbackBlock(feedback),
+  });
 }
 
 /** For a master CV that isn't LaTeX: rebuild it in the template's structure. */
-export function tailorCvFromTextPrompt(input: { profile: Profile; knowledge: Knowledge; job: JobDetail; insights: JobInsights; compact: boolean; feedback: string[] }) {
-  const { profile, knowledge, job, insights, compact, feedback } = input;
-  return {
-    system: `You tailor a student's CV for one internship without changing any facts. The result is typeset with a fixed LaTeX résumé template, so you return its content as structured fields.\n\n${CV_PRINCIPLES}\n\n${GROUNDING_RULES}`,
-    prompt: `${profileBlock(profile)}
+export function tailorCvFromTextPrompt({ profile, knowledge, job, insights, compact, feedback }: CvInput): Rendered {
+  return render("cv_from_text", {
+    cv_principles: cvPrinciples(),
+    grounding_rules: grounding(),
+    profile: profileBlock(profile),
+    master_cv: compact ? truncate(knowledge.master?.content ?? "", 12_000) : (knowledge.master?.content ?? ""),
+    knowledge: knowledgeBlock(knowledge, compact),
+    job: jobBlock(job, true),
+    analysis: analysisBlock(insights),
+    feedback: feedbackBlock(feedback),
+  });
+}
 
-<master_cv>
-${compact ? truncate(knowledge.master?.content ?? "", 12_000) : (knowledge.master?.content ?? "")}
-</master_cv>
-
-${knowledgeBlock(knowledge, compact)}
-
-${jobBlock(job, true)}
-
-${analysisBlock(insights)}${feedbackBlock(feedback)}
-
-Produce a tailored CV for this role in the template's structure.
-
-- name and contacts: exactly as in the master CV (phone, email, website, LinkedIn, GitHub). Use the link as url, or an empty string when there isn't one.
-- sections, in this order when the master CV has them: Education, Technical Skills, Certifications & Awards, Experiences, Leadership & Activities, Projects, Research Papers. Don't add sections the master CV doesn't have, such as a summary or objective.
-  - Education, Experiences, Leadership & Activities use kind "entries": title is the school or organization; subtitle is the degree or role. For Education, title_right is the dates and subtitle_right the location; for the others, title_right is the location and subtitle_right the dates.
-  - Certifications & Awards, Projects, Research Papers use kind "items": heading is the name in **bold**, then " | " and details such as technologies or issuer; date is the date.
-  - Technical Skills uses kind "skills" with skill_lines, each a label and its items.
-  - Leave the arrays a section doesn't use empty.
-- Copy organizations, roles, degrees, dates and locations exactly. Follow the CV strategy: choose and order entries and bullets by the strength of their evidence for this role; keep all education.
-- Put **double asterisks** around key technologies and outcomes.
-
-changes: each meaningful change, with the section, what changed, and which requirement it serves.`,
-  };
+export function cvVerifyPrompt(bullets: { id: string; entryLabel: string; text: string; evidence: { id: string; text: string }[] }[]): Rendered {
+  return render("cv_verify", {
+    bullets: bullets
+      .map((b) => `${b.id} (${b.entryLabel}): ${b.text}\n  Evidence:\n${b.evidence.map((e) => `  - ${e.id}: ${e.text}`).join("\n")}`)
+      .join("\n\n"),
+  });
 }
 
 // ---------- Cover letter ----------
 
-interface LetterInput {
+export interface LetterInput {
   profile: Profile;
   knowledge: Knowledge;
   job: JobDetail;
@@ -386,61 +437,76 @@ interface LetterInput {
   cvText: string;
   angle: string;
   compact: boolean;
-  feedback: string[];
+  /** Status-dependent instruction for the one location sentence (worker/letters/lint.ts). */
+  locationGuidance: string;
+  voice: string;
 }
 
-function letterContext({ profile, knowledge, job, insights, cvText, angle, compact, feedback }: LetterInput): string {
+function letterContext({ profile, knowledge, job, insights, angle, compact }: LetterInput): string {
+  // Slimmed: only relevant CV entries and a trimmed posting. The CV itself isn't included; a deterministic check
+  // flags a letter that repeats it word for word.
   return `${profileBlock(profile)}
 
-${knowledgeBlock(knowledge, compact)}
+${relevantKnowledgeBlock(knowledge, insights)}
 
-${jobBlock(job, compact)}
+<job_posting>
+Company: ${job.company}
+Title: ${job.title}${job.location ? `\nLocation: ${job.location}` : ""}
+
+${truncate(job.description, compact ? 4_000 : 6_000)}
+</job_posting>
 
 ${factsBlock(insights.companyFacts)}
 
-${analysisBlock(insights)}
-
-<tailored_cv>
-The CV this letter accompanies. Stay consistent with it without repeating its bullets.
-${truncate(cvText, compact ? 5_000 : 12_000)}
-</tailored_cv>${
+${analysisBlock(insights)}${
     angle ? `\n\n<candidate_angle>\nThe candidate asked the letter to reflect this, in their own words. It counts as evidence with the id "angle":\n${angle}\n</candidate_angle>` : ""
-  }${feedbackBlock(feedback)}`;
+  }`;
 }
 
 /** Cover letters are planned first, so the narrative is explicit and reviewable, then written from the plan. */
-export function coverLetterPlanPrompt(input: LetterInput) {
-  return {
-    system: `You plan internship cover letters with a student: short, specific letters that give a hiring manager the context a CV can't.\n\n${LETTER_PRINCIPLES}\n\n${GROUNDING_RULES}`,
-    prompt: `${letterContext(input)}
-
-Plan the letter. Don't write it yet.
-- company_need: what this team needs from the role, from the posting and research.
-- why_role: why this specific role fits where the candidate is heading, grounded in their experience.
-- why_company: what makes the application specific to this company or product, using only the posting and research.
-- company_fact_ids: research fact ids used, and "posting" when using facts from the job posting.
-- narrative: two or three links in the chain. need: the team's need; experience: the candidate's real experience that answers it, specifically; why_it_matters: why it carries over to this work; requirement_ids; evidence_ids.
-- contribution: what the candidate can realistically contribute as an intern.
-- motivation: why this opportunity matters to the candidate, from their notes or angle, or "placeholder" when neither says.`,
-  };
+export function coverLetterPlanPrompt(input: LetterInput): Rendered {
+  return render("letter_plan", { grounding_rules: grounding(), context: letterContext(input), location_guidance: input.locationGuidance });
 }
 
-export function coverLetterWritePrompt(input: LetterInput & { plan: LetterPlan }) {
+export function coverLetterWritePrompt(input: LetterInput & { plan: LetterPlan; lintFeedback: string }): Rendered {
   const { profile, knowledge, plan } = input;
-  return {
-    system: `You write internship cover letters with a student from an agreed plan: short, specific letters that give a hiring manager the context a CV can't.\n\n${LETTER_PRINCIPLES}\n\n${GROUNDING_RULES}`,
-    prompt: `${letterContext(input)}
+  return render("letter_write", {
+    letter_style: letterStyle(),
+    grounding_rules: grounding(),
+    context: letterContext(input),
+    voice: input.voice,
+    plan: JSON.stringify(plan, null, 2),
+    lint_feedback: input.lintFeedback,
+    name: candidateName(profile, knowledge) || "the candidate's name",
+    company: input.job.company,
+    location_guidance: input.locationGuidance,
+  });
+}
 
-<letter_plan>
-${JSON.stringify(plan, null, 2)}
-</letter_plan>
+export function letterCritiquePrompt(input: { job: JobDetail; insights: JobInsights; letter: string; compact: boolean }): Rendered {
+  const { job, insights } = input;
+  const summary = [`${job.company}: ${job.title}${job.location ? ` (${job.location})` : ""}`, roleBlock(insights), `Hiring signals: ${insights.strategy.topHiringSignals.join("; ")}`].join("\n");
+  return render("letter_critique", {
+    job_summary: summary,
+    posting: truncate(job.description, input.compact ? 4_000 : 7_000),
+    facts: factsBlock(insights.companyFacts),
+    letter: input.letter,
+  });
+}
 
-Write the letter from the plan.
-
-letter_markdown: the complete letter, 250–350 words in three or four paragraphs. Begin with "Dear Hiring Team," unless the posting names a person, and end with "Sincerely," and ${candidateName(profile, knowledge) || "the candidate's name"}. Follow the plan's narrative, name the company, and don't restate the CV's bullets. No address or date block. If the plan's motivation is "placeholder", write a bracketed placeholder for the candidate to fill in instead of inventing one.
-
-claims: every factual statement the letter makes about the candidate or the company, with the evidence_ids and company_fact_ids that support it.`,
-  };
+export function letterRevisePrompt(input: LetterInput & { letter: string; critique: string; lintFeedback: string }): Rendered {
+  const { profile, knowledge } = input;
+  return render("letter_revise", {
+    letter_style: letterStyle(),
+    grounding_rules: grounding(),
+    context: letterContext(input),
+    voice: input.voice,
+    letter: input.letter,
+    critique: input.critique,
+    lint_feedback: input.lintFeedback,
+    name: candidateName(profile, knowledge) || "the candidate's name",
+    location_guidance: input.locationGuidance,
+  });
 }
 
 // ---------- Quality review ----------
@@ -448,9 +514,9 @@ claims: every factual statement the letter makes about the candidate or the comp
 const CV_CRITERIA_TEXT: Record<(typeof CV_CRITERIA)[number], string> = {
   relevance: "Scanning for a few seconds, would a recruiter see why this candidate fits this role?",
   evidence: "Are the top hiring signals backed by the strongest evidence in the knowledge base?",
-  credibility: "Do technical claims read as real, specific engineering work?",
+  credibility: "Do technical claims read as real, specific engineering work, with the concrete details kept?",
   clarity: "Is each bullet easy to parse, with its point first?",
-  impact: "Do bullets show outcomes where the evidence has them, without artificial metrics?",
+  impact: "Do bullets lead with outcomes where the evidence has them, without artificial metrics?",
   ats: "Standard sections and plain wording that a parser reads correctly?",
   keywords: "Are the posting's terms used only where accurate, without stuffing?",
   consistency: "Consistent tense, emphasis, formatting and facts?",
@@ -462,9 +528,9 @@ const LETTER_CRITERIA_TEXT: Record<(typeof COVER_LETTER_CRITERIA)[number], strin
   role_specificity: "Is it clearly about this role and its work rather than any internship?",
   narrative: "Does it build a logical chain from the team's need to the candidate's experience to why this role?",
   evidence: "Are its claims backed by concrete experience?",
-  authenticity: "Does it sound like this candidate, without manufactured feelings or familiarity?",
-  conciseness: "About 250–350 words, with nothing that could be cut without loss?",
-  natural_language: "Free of generic AI phrasing and filler?",
+  authenticity: "Does it sound like this candidate, a person, without manufactured feelings or familiarity?",
+  conciseness: `About ${LETTER_RULES.minWords}–${LETTER_RULES.maxWords} words, with nothing that could be cut without loss?`,
+  natural_language: "Free of generic AI phrasing, filler and machine rhythm?",
   cv_consistency: "Consistent with the CV, adding context rather than repeating it?",
   reason_for_applying: "Is the reason for applying clear and believable?",
 };
@@ -478,37 +544,24 @@ export function reviewPrompt(input: {
   checks: QualityIssue[];
   cvText?: string;
   compact: boolean;
-}) {
+}): Rendered {
   const { kind, content, knowledge, job, insights, checks, cvText, compact } = input;
   const letter = kind === "cover_letter";
   const criteria = letter ? LETTER_CRITERIA_TEXT : CV_CRITERIA_TEXT;
-  return {
-    system:
-      "You are the final reviewer for an internship application: a senior engineer who screens applications, working with a recruiter. You decide whether a document is ready to send. Judge against the evidence, quote the exact text you're judging, and hold a high bar: generic, keyword-stuffed or unsupported writing isn't ready.",
-    prompt: `${knowledgeBlock(knowledge, compact)}
-
-${jobBlock(job, true)}
-
-${analysisBlock(insights)}${letter ? `\n\n${factsBlock(insights.companyFacts)}\n\n<tailored_cv>\n${truncate(cvText ?? "", 8_000)}\n</tailored_cv>` : ""}
-
-<${letter ? "cover_letter" : "cv"}>
-${content}
-</${letter ? "cover_letter" : "cv"}>
-
-<automated_checks>
-${checks.length ? checks.map((c) => `- [${c.severity}] ${c.message}${c.quote ? ` (“${c.quote}”)` : ""}`).join("\n") : "None."}
-</automated_checks>
-
-Score the ${letter ? "letter" : "CV"} from 1 to 5 on each criterion (5: would impress a hiring manager; 3: acceptable; 2 or lower: must be fixed before sending):
-${Object.entries(criteria)
-  .map(([key, text]) => `- ${key}: ${text}`)
-  .join("\n")}
-
-scores: one per criterion, each with a one-sentence note.
-issues: specific problems, each with the exact quote, the problem and a concrete fix. blocking: unsupported or inflated claims, invented familiarity, generic or keyword-stuffed writing, anything that would hurt the application. warning: worthwhile improvements. Don't repeat the automated checks.
-verdict: "ready" only if nothing blocking remains and no criterion scores 2 or lower; otherwise "revise".
-summary: two sentences on whether it's ready and the most important fix.`,
-  };
+  return render("review", {
+    knowledge: letter ? relevantKnowledgeBlock(knowledge, insights) : knowledgeBlock(knowledge, compact),
+    job: jobHeaderBlock(job),
+    analysis: analysisBlock(insights),
+    letter_context: letter ? `\n\n${factsBlock(insights.companyFacts)}\n\n<tailored_cv>\n${truncate(cvText ?? "", 8_000)}\n</tailored_cv>` : "",
+    tag: letter ? "cover_letter" : "cv",
+    content,
+    checks: checks.length ? checks.map((c) => `- [${c.severity}] ${c.message}${c.quote ? ` (“${c.quote}”)` : ""}`).join("\n") : "None.",
+    unit: letter ? "sentence" : "bullet",
+    label: letter ? "letter" : "CV",
+    criteria: Object.entries(criteria)
+      .map(([key, text]) => `- ${key}: ${text}`)
+      .join("\n"),
+  });
 }
 
 // ---------- Application answers ----------
@@ -520,29 +573,18 @@ export const DEFAULT_QUESTIONS = (company: string) => [
   "Describe a challenge you faced on a project and how you handled it.",
 ];
 
-export function answersPrompt(input: { profile: Profile; knowledge: Knowledge; job: JobDetail; insights: JobInsights; questions: string[]; compact: boolean }) {
+export function answersPrompt(input: { profile: Profile; knowledge: Knowledge; job: JobDetail; insights: JobInsights; questions: string[]; compact: boolean }): Rendered {
   const { profile, knowledge, job, insights, questions, compact } = input;
-  return {
-    system: `You help a student prepare application answers for one internship: specific, first-person and grounded in real experience.\n\n${GROUNDING_RULES}`,
-    prompt: `${profileBlock(profile)}
-
-${knowledgeBlock(knowledge, compact)}
-
-${jobBlock(job, compact)}
-
-${factsBlock(insights.companyFacts)}
-
-${analysisBlock(insights)}
-
-<questions>
-${questions.map((q, i) => `${i + 1}. ${q}`).join("\n")}
-</questions>
-
-Prepare:
-- introduction: a 2–3 sentence professional introduction (about 50 words) for recruiter messages or "Tell us about yourself", built on the strongest evidence for this role.
-- answers: one per question, in order, 80–150 words unless the question implies a short answer. Build each on the evidence that best answers what the question is really asking. When a question needs something the knowledge base doesn't contain (start date, salary, availability, personal motivation), write a bracketed placeholder such as [Add your available start date] instead of guessing. In based_on, list the evidence ids used.
-- project_explanations: the two projects or experiences with the strongest evidence for this role, about 80 words each: what it is, what the candidate did, the technical decisions and technologies, and why it matters for this role.`,
-  };
+  return render("answers", {
+    letter_style_short: "Plain, direct sentences. No em dashes, no semicolons, and none of the usual application filler (passionate, excited, leverage, dynamic, fast-paced).",
+    grounding_rules: grounding(),
+    profile: profileBlock(profile),
+    knowledge: knowledgeBlock(knowledge, compact),
+    job: jobBlock(job, compact),
+    facts: factsBlock(insights.companyFacts),
+    analysis: analysisBlock(insights),
+    questions: questions.map((q, i) => `${i + 1}. ${q}`).join("\n"),
+  });
 }
 
 export function renderAnswersMarkdown(data: z.infer<typeof AnswersSchema>): string {

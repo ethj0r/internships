@@ -934,3 +934,31 @@ export function omittedEntries(master: CvDoc, tailored: CvDoc): { section: strin
 export function isAlwaysIncluded(s: CvSection): boolean {
   return sectionRule(s).keepAll;
 }
+
+// ---------------------------------------------------------------------------
+// Header and length
+// ---------------------------------------------------------------------------
+
+/**
+ * Adds location (and, when confirmed, work authorization) to the header as the first contact items. Items already
+ * in the header aren't repeated.
+ */
+export function withHeaderItems(doc: CvDoc, items: string[]): CvDoc {
+  const existing = new Set(doc.header.contacts.map((c) => c.text.trim().toLowerCase()));
+  const added = items.map((t) => t.trim()).filter((t) => t && !existing.has(t.toLowerCase()));
+  return { ...doc, header: { ...doc.header, contacts: [...added.map((text) => ({ text, url: null })), ...doc.header.contacts] } };
+}
+
+/** Rough rendered line count at the template's 11pt letter size (~105 characters per line). For comparing versions. */
+export function estimateLines(doc: CvDoc): number {
+  const wrap = (rich: string, width = 105) => Math.max(1, Math.ceil(plain(rich).length / width));
+  let lines = 3; // name and contacts
+  for (const s of doc.sections) {
+    lines += 1.6;
+    if (s.type === "entries") for (const e of s.entries) lines += 2.2 + e.bullets.reduce((n, b) => n + wrap(b, 100), 0);
+    else if (s.type === "items") for (const it of s.items) lines += 1.2 * wrap(it.heading, 95) + it.bullets.reduce((n, b) => n + wrap(b, 100), 0);
+    else if (s.type === "skills") lines += s.lines.reduce((n, l) => n + wrap(`${l.label}: ${l.items.join(", ")}`), 0);
+    else lines += 2;
+  }
+  return Math.round(lines);
+}

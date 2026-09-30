@@ -1,5 +1,7 @@
 // Row mapping and small D1 helpers. SQL lives next to the feature that uses it.
 
+import type { Eligibility, EligibilityStatus } from "../../shared/eligibility";
+import type { Tier } from "../../shared/priority";
 import type {
   Application,
   ApplicationStatus,
@@ -71,6 +73,12 @@ export interface JobRow {
   duplicate_of: number | null;
   dismissed_at: string | null;
   closed_at: string | null;
+  closed_reason: string | null;
+  eligibility_status: EligibilityStatus;
+  eligibility: string | null;
+  priority_tier: number;
+  season: string | null;
+  priority_score: number;
   app_id: number | null;
   app_status: ApplicationStatus | null;
   app_priority: Priority | null;
@@ -92,7 +100,8 @@ export interface JobDetailRow extends JobRow {
 }
 
 export const JOB_SUMMARY_SELECT = `j.id, j.company, j.title, j.location, j.workplace, j.region, j.source_kind, j.url, j.posted_at,
-  j.deadline, j.first_seen_at, j.match_score, j.duplicate_of, j.dismissed_at, j.closed_at,
+  j.deadline, j.first_seen_at, j.match_score, j.duplicate_of, j.dismissed_at, j.closed_at, j.closed_reason,
+  j.eligibility_status, j.eligibility, j.priority_tier, j.season, j.priority_score,
   a.id AS app_id, a.status AS app_status, a.priority AS app_priority`;
 
 export const JOB_DETAIL_SELECT = `${JOB_SUMMARY_SELECT}, j.source_id, j.external_id, j.department, j.employment_type,
@@ -116,6 +125,12 @@ export function toJobSummary(r: JobRow): JobSummary {
     duplicateOf: r.duplicate_of,
     dismissedAt: r.dismissed_at,
     closedAt: r.closed_at,
+    closedReason: r.closed_reason,
+    eligibilityStatus: r.eligibility_status,
+    eligibility: parseJson<Eligibility | null>(r.eligibility, null),
+    priorityTier: (r.priority_tier || 4) as Tier,
+    season: r.season,
+    priorityScore: r.priority_score,
     application: r.app_id && r.app_status && r.app_priority ? { id: r.app_id, status: r.app_status, priority: r.app_priority } : null,
   };
 }
@@ -285,6 +300,7 @@ interface ProfileRow {
   remote_preference: RemotePreference;
   search_scope: SearchScope;
   work_authorization: string;
+  sg_work_authorization: string;
   keywords_include: string;
   keywords_exclude: string;
   notify_min_score: number;
@@ -309,6 +325,7 @@ export async function getProfile(db: D1Database): Promise<Profile> {
     remotePreference: r.remote_preference,
     searchScope: r.search_scope ?? "indonesia_remote",
     workAuthorization: r.work_authorization,
+    sgWorkAuthorization: r.sg_work_authorization ?? "",
     keywordsInclude: parseJson(r.keywords_include, []),
     keywordsExclude: parseJson(r.keywords_exclude, []),
     notifyMinScore: r.notify_min_score,

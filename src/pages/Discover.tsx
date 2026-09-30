@@ -1,9 +1,11 @@
-import { useState, type KeyboardEvent } from "react";
+import { Fragment, useState, type KeyboardEvent } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
+import { ELIGIBILITY_LABELS, STATUS_ORDER } from "../../shared/eligibility";
 import type { JobSummary } from "../../shared/types";
 import { AddJobSheet } from "../components/AddJobSheet";
 import { NotificationsButton } from "../components/AppShell";
 import { EmptyState, ErrorState, MatchRing, Segmented, StatusLabel } from "../components/common";
+import { EligibilityBadge, PriorityChips, WatchlistCard } from "../components/Eligibility";
 import { Icon, Spinner } from "../components/Icon";
 import { JobDetailView } from "../components/JobDetailView";
 import { MenuButton } from "../components/Menu";
@@ -26,12 +28,12 @@ export function Discover() {
   const q = useDebounced(search.trim(), 250);
 
   const view = (params.get("view") as View) || "inbox";
-  const sort = (params.get("sort") as Sort) || (view === "inbox" ? "score" : "newest");
+  const sort = (params.get("sort") as Sort) || (view === "inbox" || view === "all" ? "priority" : "newest");
   const workplace = params.get("workplace") ?? "";
-  const region = (params.get("region") as JobQuery["region"]) || undefined;
+  const eligibility = (params.get("eligibility") as JobQuery["eligibility"]) || undefined;
   const minScore = Number(params.get("minScore") ?? 0);
 
-  const query: JobQuery = { view, sort, q, workplace: workplace || undefined, region, minScore: minScore || undefined, limit: 200 };
+  const query: JobQuery = { view, sort, q, workplace: workplace || undefined, eligibility, minScore: minScore || undefined, limit: 200 };
   const key = `jobs:${JSON.stringify(query)}`;
   const { data, error, loading, reload } = useResource(key, () => api.jobs(query));
   const { data: overview } = useResource("overview", api.overview);
@@ -44,12 +46,16 @@ export function Discover() {
     setParams(next, { replace: true });
   };
   const listSearch = params.toString() ? `?${params}` : "";
-  const jobs = data?.jobs ?? [];
+  // Priority order is shown as the shortlist: grouped by eligibility status, best first within each group.
+  const grouped = sort === "priority" && !eligibility;
+  const jobs = grouped
+    ? [...(data?.jobs ?? [])].sort((a, b) => STATUS_ORDER.indexOf(a.eligibilityStatus) - STATUS_ORDER.indexOf(b.eligibilityStatus) || b.priorityScore - a.priorityScore)
+    : (data?.jobs ?? []);
 
   const [checkNow, checking] = useAction(async () => {
     const run = await api.runDiscovery();
     invalidate("jobs", "overview", "sources", "runs");
-    toast.show(run.jobsNew ? `Found ${plural(run.jobsNew, "new internship")}` : `Checked ${plural(run.sourcesChecked, "source")}. Nothing new yet.`);
+    toast.show(run.jobsNew ? `Found ${plural(run.jobsNew, "new posting")}, checked for eligibility` : `Checked ${plural(run.sourcesChecked, "source")}. Nothing new yet.`);
   }, toast.error);
 
   const select = (job: JobSummary | undefined) => job && navigate(`/discover/${job.id}${listSearch}`);
@@ -67,7 +73,7 @@ export function Discover() {
     navigate(next && next.id !== selectedId ? `/discover/${next.id}${listSearch}` : `/discover${listSearch}`, { replace: true });
   };
 
-  const filtersActive = Boolean(workplace || region || minScore);
+  const filtersActive = Boolean(workplace || eligibility || minScore);
 
   return (
     <div className="split" data-detail={selectedId !== null}>
@@ -85,6 +91,7 @@ export function Discover() {
               label="Sort and filter"
               align="end"
               items={[
+                { key: "priority", label: "Priority (Shortlist)", checked: sort === "priority", onSelect: () => setParam("sort", "priority") },
                 { key: "score", label: "Best Match", checked: sort === "score", onSelect: () => setParam("sort", "score") },
                 { key: "newest", label: "Newest", checked: sort === "newest", onSelect: () => setParam("sort", "newest") },
                 { key: "deadline", label: "Closing Soon", checked: sort === "deadline", onSelect: () => setParam("sort", "deadline") },
@@ -92,9 +99,14 @@ export function Discover() {
                 { key: "remote", label: "Remote", checked: workplace === "remote", onSelect: () => setParam("workplace", "remote") },
                 { key: "hybrid", label: "Hybrid", checked: workplace === "hybrid", onSelect: () => setParam("workplace", "hybrid") },
                 { key: "onsite", label: "On-site", checked: workplace === "onsite", onSelect: () => setParam("workplace", "onsite") },
-                { key: "area", label: "Whole Search Area", checked: !region, separatorBefore: true, onSelect: () => setParam("region", null) },
-                { key: "indonesia", label: "Indonesia", checked: region === "indonesia", onSelect: () => setParam("region", "indonesia") },
-                { key: "asia", label: "Elsewhere in Asia", checked: region === "asia", onSelect: () => setParam("region", "asia") },
+                { key: "elig-all", label: "All But Excluded", checked: !eligibility, separatorBefore: true, onSelect: () => setParam("eligibility", null) },
+                { key: "elig-eligible", label: "Eligible Only", checked: eligibility === "eligible", onSelect: () => setParam("eligibility", "eligible") },
+                ...(["ELIGIBLE_REMOTE", "ELIGIBLE_INDONESIA", "ELIGIBLE_SINGAPORE", "CHECK_MANUALLY", "EXCLUDED"] as const).map((s) => ({
+                  key: s,
+                  label: ELIGIBILITY_LABELS[s],
+                  checked: eligibility === s,
+                  onSelect: () => setParam("eligibility", s),
+                })),
                 { key: "m0", label: "Any Match", checked: !minScore, separatorBefore: true, onSelect: () => setParam("minScore", null) },
                 { key: "m50", label: "50% Match or Higher", checked: minScore === 50, onSelect: () => setParam("minScore", "50") },
                 { key: "m75", label: "75% Match or Higher", checked: minScore === 75, onSelect: () => setParam("minScore", "75") },
@@ -146,6 +158,8 @@ export function Discover() {
             </Link>
           )}
 
+          {view === "inbox" && !q && <WatchlistCard />}
+
           {!data && loading ? (
             <div className="center-fill">
               <Spinner />
@@ -159,7 +173,7 @@ export function Discover() {
               <EmptyState
                 icon="tray"
                 title="You're all caught up"
-                message="Sources are checked every hour. New internships that fit your focus appear here."
+                message="Every source is checked once every 3 days. New postings you can take appear here after the eligibility check."
                 action={
                   <button type="button" className="btn" onClick={() => void checkNow()} disabled={checking}>
                     {checking ? <Spinner /> : <Icon name="refresh" />}
@@ -173,8 +187,11 @@ export function Discover() {
           ) : (
             <>
               <p className="list-count">{plural(data?.total ?? jobs.length, "internship")}</p>
-              {jobs.map((job) => (
-                <JobRow key={job.id} job={job} selected={job.id === selectedId} href={`/discover/${job.id}${listSearch}`} showNew={view === "inbox"} />
+              {jobs.map((job, i) => (
+                <Fragment key={job.id}>
+                  {grouped && job.eligibilityStatus !== jobs[i - 1]?.eligibilityStatus && <h2 className="list-group-title">{ELIGIBILITY_LABELS[job.eligibilityStatus]}</h2>}
+                  <JobRow job={job} selected={job.id === selectedId} href={`/discover/${job.id}${listSearch}`} showNew={view === "inbox"} />
+                </Fragment>
               ))}
             </>
           )}
@@ -214,6 +231,10 @@ function JobRow({ job, selected, href, showNew }: { job: JobSummary; selected: b
         <div className="job-row-company truncate">{job.company}</div>
         <div className="job-row-title truncate">{job.title}</div>
         {place && <div className="job-row-meta truncate">{place}</div>}
+        <div className="job-row-tags">
+          <EligibilityBadge status={job.eligibilityStatus} short />
+          <PriorityChips job={job} />
+        </div>
       </div>
       <div className="job-row-aside">
         <span>{relativeTime(job.firstSeenAt)}</span>

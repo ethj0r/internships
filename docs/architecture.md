@@ -12,7 +12,7 @@ data sources, automation feasibility, scope, Cloudflare deployment and repositor
 | Frontend | React 19 + React Router 7 (SPA), plain CSS design tokens | A productivity app with no SEO needs; custom CSS keeps full control over the Apple-style design. |
 | Build | Vite + `@cloudflare/vite-plugin` | Runs the Worker in `workerd` during development; one `vite build` produces both bundles. |
 | Database | Cloudflare D1 (SQLite) | Relational data (jobs, applications, documents, audit log) with migrations. |
-| AI | Claude (`claude-opus-5`) when `ANTHROPIC_API_KEY` is set, otherwise Workers AI (`llama-3.3-70b-instruct-fp8-fast`) | Works out of the box on Cloudflare; higher quality writing when a Claude key is added. |
+| AI | Open-weight models: GLM-5.3 / GLM-5.3-Flash on NVIDIA's free OpenAI-compatible API, gpt-oss-120b / Qwen3 on Workers AI as fallback, bge-m3 embeddings. Claude optional. | Free, open and swappable by config. See [models.md](models.md). |
 | CV file parsing | Workers AI `toMarkdown` | Converts PDF/DOCX uploads without extra services. |
 | Validation | zod | Request bodies and model outputs. |
 | Tests | Vitest | Parsing, matching and fabrication checks are pure functions. |
@@ -46,7 +46,10 @@ flowchart LR
 Module boundaries follow the product workflow:
 
 - **Discovery** (`worker/discovery`): each platform is a `SourceAdapter` with `list()`, optional
-  `hydrate()` and `resolveName()`. The orchestrator filters relevant internships, dedupes, scores and stores.
+  `hydrate()` and `resolveName()`. The orchestrator filters relevant internships, dedupes, detects changes, scores and
+  stores; `refresh.ts` runs 3-day refresh cycles and writes their summaries.
+- **Eligibility** (`shared/eligibility.ts`, `worker/eligibility`): rules, then the fast model for ambiguous postings,
+  then a pure `decide()`; gates all generation. `shared/priority.ts` ranks the shortlist.
 - **Parsing** (`worker/lib/text.ts`): HTML to Markdown, workplace, deadline and duration detection, fingerprints.
 - **Matching** (`worker/matching`): deterministic scoring for every job, plus verification of generated text.
 - **Personalization** (`worker/personalization`): career knowledge base, job insights (requirement → evidence map, strategy, cited company research), claim validation. See [personalization.md](personalization.md).
@@ -100,7 +103,9 @@ Details: [personalization.md](personalization.md).
 
 ### Scheduling
 
-Cron runs hourly. Each run checks the `DISCOVERY_SOURCES_PER_RUN` least-recently-checked sources (round-robin), and fetches at most
+Cron runs hourly but only works during a **refresh cycle**, which starts once every `REFRESH_INTERVAL_HOURS` (72) based on
+a stored start time rather than a day-of-month cron expression (see [data-sources.md](data-sources.md#refresh-schedule)).
+During a cycle, each run checks the `DISCOVERY_SOURCES_PER_RUN` least-recently-checked sources not yet checked this cycle, classifies new and changed postings for eligibility, and fetches at most
 `DISCOVERY_MAX_DETAIL_FETCHES` full descriptions (Greenhouse lists omit them). That keeps each invocation well inside Workers'
 subrequest and CPU limits. Postings not fetched because of the budget are picked up on the next run. A second daily cron creates deadline reminders.
 
@@ -134,6 +139,8 @@ erDiagram
 | `events` | Append-only audit log. |
 | `notifications` | New strong matches, deadline reminders, source failures. Deduplicated by key. |
 | `discovery_runs` | History of discovery runs with counts and errors. |
+| `refresh_cycles` | One row per 3-day refresh cycle, with its summary (new, changed, closed, counts per eligibility status). |
+| `embeddings` | Cached bge-m3 vectors for evidence and requirements. |
 
 ## 4. Data sources
 
@@ -158,7 +165,8 @@ Also included because the flow depends on them: master CV upload (PDF/DOCX/Markd
 sources management, deadline tracking and reminders, in-app notifications, audit log, single-owner authentication.
 
 Deferred: email notifications (Cloudflare Email Service needs a verified domain), multi-user accounts, DOCX export
-(print-to-PDF covers the need), browser-extension autofill, semantic search with Vectorize.
+(print-to-PDF covers the need), browser-extension autofill. Semantic matching uses embeddings cached in D1 and cosine
+similarity in the Worker; Vectorize becomes worthwhile only with thousands of evidence items.
 
 ## 7. Cloudflare deployment architecture
 

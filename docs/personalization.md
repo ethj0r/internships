@@ -42,28 +42,35 @@ References:
 
 ```mermaid
 flowchart TD
+  E["Eligibility check<br/>(shared/eligibility.ts)<br/>only eligible or approved postings continue"]
   KB["Knowledge base<br/>master CV + your notes + profile<br/>(worker/personalization/knowledge.ts)"]
-  R["Company research<br/>Claude web search, cited facts only"]
-  I["Job insights<br/>requirements → competencies → evidence map → strategy<br/>(worker/personalization/insights.ts)"]
+  R["Company research<br/>Claude only, cited facts"]
+  A["1. Role analysis<br/>requirements, core problems, intern scope, implicit signals<br/>(no CV in view)"]
+  S["2. Semantic retrieval<br/>bge-m3 embeddings, top evidence per requirement"]
+  J["3. Evidence judge<br/>ranks evidence per requirement, why, strategy"]
   V1["Validate map<br/>(validateMatches)"]
   CV["CV plan: entries, bullets with evidence ids"]
-  V2["Validate every bullet<br/>(applyBulletProposals)"]
-  CL["Cover letter plan + letter + claims"]
-  V3["Validate claims, deterministic letter checks"]
+  V2["Bullet guards<br/>(applyBulletProposals)"]
+  V3["Claim-by-claim verification<br/>(prompts/cv_verify.md)"]
+  CL["Letter: plan → write in your voice"]
+  L["Lint<br/>(worker/letters/lint.ts)<br/>rewrite until clean"]
+  C["Skeptical recruiter critique → one revision → lint"]
   Q["Quality review<br/>deterministic checks + reviewer model"]
   D["Draft saved for your approval"]
-  KB --> I
-  R --> I
-  I --> V1 --> CV --> V2 --> Q
-  V1 --> CL --> V3 --> Q
-  Q -- "needs work (once)" --> CV
-  Q -- "needs work (once)" --> CL
+  E --> A
+  KB --> S
+  R --> A
+  A --> S --> J --> V1
+  V1 --> CV --> V2 --> V3 --> Q
+  V1 --> CL --> L --> C --> Q
+  Q -- "CV needs work (once)" --> CV
   Q --> D
 ```
 
 Every stage is split the same way: **the model proposes, deterministic code decides** what may be presented as the
-candidate's experience ([`worker/personalization/validate.ts`](../worker/personalization/validate.ts), unit-tested in
-[`test/personalization.test.ts`](../test/personalization.test.ts)).
+candidate's experience ([`worker/personalization/validate.ts`](../worker/personalization/validate.ts),
+[`worker/letters/lint.ts`](../worker/letters/lint.ts), unit-tested in [`test/`](../test)). Prompts live in
+[`worker/prompts/`](../worker/prompts) as Markdown files you can edit; models are listed in [models.md](models.md).
 
 ## 1. Knowledge base
 
@@ -82,15 +89,28 @@ collaboration, results. They are treated as the candidate's own statements.
 
 ## 2. Job insights
 
-One model call per job ([`insightsPrompt`](../worker/ai/prompts.ts)), cached in `job_insights` and rebuilt when the
-posting, master CV, notes or relevant profile fields change (an input hash).
+Built once per job, cached in `job_insights`, and rebuilt when the posting, master CV, notes, relevant profile fields
+or company signals change (an input hash). Three steps:
 
-For each requirement the model records the explicit text, its kind (**required**, **preferred**, **responsibility**,
-**context**), importance (1–5), the **underlying competencies** ("scalable backend services" → API design, database design,
-performance, reliability, production ownership), why the team needs it, what evidence would convince a hiring manager,
-and the employer's own terms.
+1. **Role analysis** ([`prompts/role_analysis.md`](../worker/prompts/role_analysis.md)). The model reads the posting
+   *without* the CV, so requirements describe the job rather than bending toward the candidate. It returns structured
+   JSON: requirements (text, kind: **required** / **preferred** / **responsibility** / **context**, importance 1–5,
+   underlying competencies, why it matters, what would convince, the employer's terms), the **core problems** the team
+   solves, the realistic **intern scope**, and **implicit signals** (ownership, ambiguity, written communication…),
+   each with the posting phrase that implies it. Signals whose phrase isn't in the posting are dropped.
+2. **Semantic retrieval** ([`worker/personalization/semantic.ts`](../worker/personalization/semantic.ts)). Every
+   requirement and every piece of evidence is embedded with bge-m3 (multilingual, open), cached in D1, and compared by
+   cosine similarity. Each requirement gets its 8 closest pieces of evidence, at most 3 per CV entry. Skill lines
+   are left out: a tool in a list isn't evidence of doing the work.
+3. **Evidence judge** ([`prompts/evidence_judge.md`](../worker/prompts/evidence_judge.md)). The model ranks which
+   candidates genuinely demonstrate each requirement, and why, and may reach into the full index when retrieval missed
+   something. It also writes the strategy.
 
-It then classifies the candidate's evidence per requirement, citing evidence ids:
+Company signals ([`config/companies.json`](../config/companies.json)) tell the analysis and the judge what a company
+tends to weigh (Amazon: ownership, customer impact; Google: technical depth, problem solving). They steer *which*
+experiences lead, never the wording: prompts forbid quoting them back.
+
+The evidence classes:
 
 | Class | Meaning |
 | --- | --- |
@@ -101,8 +121,7 @@ It then classifies the candidate's evidence per requirement, citing evidence ids
 | Gap | No credible evidence |
 | Unknown | Not enough information to judge |
 
-Matching is semantic: "worked with designers, backend developers and project leads to ship a platform" is evidence of
-cross-functional collaboration without the phrase. Validation then enforces:
+Validation then enforces:
 
 - evidence ids must exist; a strength that needs evidence but cites none becomes a **gap**;
 - a strong or relevant match for a requirement naming a technology (e.g. Kubernetes) whose cited evidence never mentions
@@ -116,50 +135,97 @@ strategy and the cover-letter angle. It's shown on the job page (Application Str
 
 ### Company research
 
-With Claude, a separate call uses server-side **web search and fetch** to research the product, team or domain,
+With the Claude option selected, a separate call uses server-side **web search and fetch** to research the product, team or domain,
 engineering challenges and blog posts, recent technical developments and stated values.
 [`parseResearchFacts()`](../worker/personalization/validate.ts) keeps **only statements carrying a citation** to a public
-source, as facts `F1…F10`. Documents may state company facts only from the posting or these. With Workers AI there is no
-research and the posting is the only source; the UI says so.
+source, as facts `F1…F10`. Documents may state company facts only from the posting or these. With the open models there's
+no research and the posting is the only source; the UI says so.
 
 ## 3. Tailored CV
 
-The model returns a plan against the master CV ([`CvPlanSchema`](../worker/ai/prompts.ts)): entries in order, and for each
-bullet its text, the master bullets it's based on (`from`), the evidence ids it uses, the requirements it addresses, and
-why. Low-relevance entries go in `omit` and low-relevance bullets in `drop`, each with a reason. Master bullets the plan
-neither uses nor drops stay, after the tailored ones, so strong evidence is never lost silently.
+The model returns a plan against the master CV ([`prompts/cv_tailor.md`](../worker/prompts/cv_tailor.md)): entries in
+order, and for each bullet its text, the master bullets it's based on (`from`), the evidence ids it uses, the
+requirements it addresses, and why. Low-relevance entries go in `omit` and low-relevance bullets in `drop`, each with a
+reason. Master bullets the plan neither uses nor drops stay, after the tailored ones, so strong evidence is never lost
+silently.
 
-[`applyBulletProposals()`](../worker/personalization/validate.ts) checks every bullet against **its own entry's
-evidence** only (heading, the bullets it rewrites, notes attached to the entry). A rewrite is rejected, and the original
-bullet kept, when it:
+Writing guidance ([`prompts/cv_principles.md`](../worker/prompts/cv_principles.md)): impact first, "accomplished X, as
+measured by Y, by doing Z" only with a real measure, keep every concrete detail of the original, and never end a
+bullet by saying what it demonstrates.
+
+**Bullet guards.** [`applyBulletProposals()`](../worker/personalization/validate.ts) checks every rewrite against
+**its own entry's evidence** only (heading, the bullets it rewrites, notes attached to the entry). A rewrite is
+rejected, and the original bullet kept, when it:
 
 - cites another entry's evidence, or traces to none;
 - names a technology the evidence doesn't mention;
 - contains a figure the evidence doesn't contain;
 - claims scope ("led", "managed", "owned", "architected", "spearheaded", "mentored", "founded", "supervised") the
-  evidence doesn't show; "Director of Technology" supports "led", "contributed to" does not.
+  evidence doesn't show; "Director of Technology" supports "led", "contributed to" does not;
+- **tells the reader what it proves** (", demonstrating…", ", showcasing the ability to learn…", "expertise in");
+- **drops the original's concrete details**: the technologies, numbers, acronyms and names that make it credible
+  (under 60% kept, or 40% when merging bullets). This is what turned "animates BFS and DFS walks over a parsed DOM
+  tree" into "a visualizer using modern technologies" in the old engine.
 
-Warnings flag filler and bullets much longer than the original. [`applyTailoring()`](../shared/cv.ts) then assembles the
-CV in the LaTeX template: header, organizations, roles, dates and headings always come from the master; bullet counts
-never grow; entries in `omit` stay out unless a section needs them to reach its minimum.
+**Claim-by-claim verification** ([`prompts/cv_verify.md`](../worker/prompts/cv_verify.md)). Every bullet that survived
+as a rewrite is split into its claims, and each is checked against that bullet's evidence: supported, partial
+(overstated) or unsupported. An unsupported claim puts the master CV's bullet back; overstated ones are flagged.
+The Tailoring view shows the result under **Claim Check**.
+
+**Assembly.** [`applyTailoring()`](../shared/cv.ts) builds the CV in the LaTeX template: header, organizations, roles,
+dates and headings always come from the master; bullet counts never grow; entries in `omit` stay out unless a section
+needs them to reach its minimum. Then:
+
+- **Location header.** Your real location ("Bandung, Indonesia") is added as the first header item, with "(UTC+7)"
+  for remote roles. For Singapore roles, a work-authorization item appears only when **Singapore work pass (confirmed
+  only)** is filled in on your profile; otherwise the CV says nothing and a warning explains what to verify.
+- **One page.** The rendered length is estimated and compared with the master; a longer version gets a warning.
 
 The document stores a **before/after** record for every bullet (rewritten, unchanged, rejected with the proposed text
-and why, left out), the requirements each addresses, the supporting evidence, the entries left out with reasons, the
-strategy and the requirement map. The **Tailoring** view shows all of it; **Diff** shows the word-level comparison.
+and why, left out), the requirements each addresses, the supporting evidence, the claim check, the entries left out
+with reasons, the strategy and the requirement map. **Diff** shows the word-level comparison.
 
 ## 4. Cover letter
 
-Two calls: the model plans ([`LetterPlanSchema`](../worker/ai/prompts.ts)), then writes the letter from that plan
-([`LetterSchema`](../worker/ai/prompts.ts)). An empty or incomplete letter is retried once and otherwise fails instead of
-being saved.
+The highest-risk document for sounding machine-written, so it gets the most machinery:
 
-- company need → why this role → why this company (research fact ids or the posting) → a two- or three-step narrative
-  chain (their need → the candidate's real experience → why it matters here) → realistic contribution → motivation;
-- motivation comes from the candidate's notes or what they wrote when generating the letter ("What draws you to…",
-  evidence id `angle`). Otherwise the letter contains a bracketed placeholder for them to fill in;
-- every factual claim is listed with the evidence ids and fact ids behind it. A claim with neither is a blocking issue.
+1. **Plan** ([`prompts/letter_plan.md`](../worker/prompts/letter_plan.md)): the team's concrete need, a specific
+   opening, a two- or three-step narrative (their need → your real experience with the detail that makes it credible
+   → why it matters here), a realistic contribution, motivation from your notes (or a placeholder), and the one
+   location sentence.
+2. **Write** ([`prompts/letter_write.md`](../worker/prompts/letter_write.md)) in your voice: files in
+   [`voice_samples/`](../voice_samples/README.md) (git-ignored) are shown as a style reference for rhythm and word
+   choice, never as evidence.
+3. **Lint** ([`worker/letters/lint.ts`](../worker/letters/lint.ts)). A program rejects the letter, and it's rewritten
+   with the violations as feedback, if it:
+   - is outside 200–280 words (body only; [`config/letter.json`](../config/letter.json), which also sets the number
+     of rewrites, 2 by default);
+   - uses an em or en dash, a semicolon, a colon in a sentence, or an exclamation mark;
+   - uses any phrase in [`config/banned_phrases.txt`](../config/banned_phrases.txt) (plain phrases or `re:` regexes:
+     "excited to apply", "leverage", "delve", "tapestry", "not only… but also", "it's not just X, it's Y"…);
+   - lists three single words in a row ("fast, reliable, and scalable");
+   - opens by announcing the application or the candidate;
+   - doesn't name the company;
+   - spends more than one sentence on location, or mentions a work pass, visa or authorization that isn't confirmed
+     on your profile;
+   - has a paragraph without a concrete detail from your experience **and** one about this company or role.
+4. **Skeptical recruiter** ([`prompts/letter_critique.md`](../worker/prompts/letter_critique.md)): a persona who has
+   read ten thousand letters flags machine-written tells, generic lines, flattery, unsupported claims and anything said
+   about the company that the posting doesn't state, quoting each, with a fix. The letter is **revised once** from the critique
+   ([`prompts/letter_revise.md`](../worker/prompts/letter_revise.md)) and linted again; the revision is kept unless it
+   breaks more rules than the draft. The Reasoning view shows the critique and the draft before revision.
+5. **Grounding**: every factual claim is listed with the evidence ids and fact ids behind it (a claim with neither is
+   blocking). There's no extra reviewer call (fast mode): the verdict comes from the rules, the grounding checks and
+   the recruiter pass. **Review Again** on the document runs the full scored review when you want it.
 
-The letter sees the tailored CV so it stays consistent without repeating it. The **Reasoning** view shows the plan.
+Prompts after the role analysis are slimmed: the CV plan gets the role analysis instead of the raw posting, the letter
+gets only the CV entries relevant to this role (from the evidence map and retrieval) and a trimmed posting, and the
+evidence judge gets a one-line-per-entry index instead of the whole knowledge base. That cuts tokens, time and quota.
+
+**Location, honestly.** Remote roles: one plain sentence about working from Bandung (UTC+7) and covering the stated
+overlap, only when the posting stresses remote work. Singapore roles: at most one sentence about being available for
+on-site or hybrid work, and a work-authorization statement only when it's confirmed on your profile. Never the
+centerpiece.
 
 ## 5. Quality review
 
@@ -171,14 +237,17 @@ Before a draft is presented, [`draftWithReview()`](../worker/documents/generate.
    duplicate bullets, filler. Letter: length (blocking over 450 words), generic phrases
    (blocking at three or more), company not named (blocking), unsupported skills or figures, unfilled placeholders,
    heavy word-for-word overlap with the CV.
-2. **A reviewer model** scoring 1–5 on each criterion, quoting the text it judges:
+2. **A reviewer model** scoring 1–5 on each criterion, quoting the text it judges. It's told that most drafts aren't a
+   5 and must quote the weakest bullet or sentence before scoring (the old reviewer gave a keyword-stuffed CV 5/5
+   across the board):
    - CV: relevance, evidence strength, technical credibility, clarity, impact, ATS readability, keyword accuracy,
      consistency, no fabricated claims.
    - Letter: company specificity, role specificity, narrative, evidence, authenticity, conciseness, avoidance of generic
      AI language, consistency with the CV, clear reason for applying.
 
-A draft is **Ready** only when nothing is blocking and no criterion scores 2 or lower. Otherwise it's regenerated once
-with the review as feedback, and the better of the two drafts is kept. The review is saved with the document.
+A draft is **Ready** only when nothing is blocking and no criterion scores 2 or lower. A CV that isn't ready is
+regenerated once with the review as feedback, and the better of the two is kept; letters already went through the
+lint and critique loop, so the review only scores them. The review is saved with the document.
 
 Editing a document marks its review stale. **Export gating**: downloading the `.tex`, opening Overleaf, printing,
 copying or approving a CV or letter that is unreviewed, stale or needs work asks first, offering to run the review.
@@ -196,6 +265,8 @@ The user can still proceed; the decision stays theirs.
 | Hide gaps | Gaps computed from the validated map and shown on the job page and every document |
 | Claim familiarity with a company | Company facts only from the posting or cited research |
 | Manufacture motivation | Motivation only from notes or the candidate's own words; otherwise a placeholder |
+| Imply a work pass you don't hold | Header and letter mention one only when confirmed on the profile; the lint rejects any unconfirmed mention |
+| Tailor for a job you can't take | Generation refuses postings that aren't eligible or approved (`409`) |
 
 ## Limits
 
@@ -203,6 +274,11 @@ The user can still proceed; the decision stays theirs.
   cross-entry facts; they can't prove a paraphrase is faithful. Before/after records exist so a person can.
 - Technology detection uses the taxonomy in [`shared/skills.ts`](../shared/skills.ts). Tools outside it aren't checked.
 - Masters that aren't LaTeX are rebuilt from text without bullet-level tracing (the document says so).
-- Workers AI has a small context and output budget: requirements are capped at 10 and there's no company research.
-- Cost and time: a first CV for a job makes up to five model calls (research, insights, plan, review, and a redraft and
-  second review when needed); insights are reused by the cover letter and answers. Expect a few minutes with Claude.
+- Without `LLM_API_KEY`, the Workers AI fallback caps requirements at 10, compacts prompts, and is slow (1–2 minutes
+  per large call). There's no company research without Claude.
+- Cost and time: a first CV makes about six model calls (role analysis, judge, plan, verification, review, sometimes a
+  redraft and second review) plus one embedding batch; insights are reused by the cover letter and answers. A letter
+  makes four to eight (plan, one to three writes, critique, one or two revisions, review). All free on NVIDIA's API
+  within its rate limit.
+- The lint's specificity rule matches words, so a paragraph can pass it while still being bland; the recruiter pass
+  and your own read are the backstop.

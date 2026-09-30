@@ -1,13 +1,14 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { applyTailoring, parseLatexCv } from "../shared/cv";
-import { findGenericPhrases, type JobRequirement, type KnowledgeNote } from "../shared/personalization";
+import { findGenericPhrases, type EvidenceItem, type JobRequirement, type KnowledgeNote } from "../shared/personalization";
 import type { Document, Profile } from "../shared/types";
 import { buildKnowledge, groupEvidence, knowledgeForPrompt } from "../worker/personalization/knowledge";
 import {
   applyBulletProposals,
   checkBullet,
   cvIssues,
+  detailRetention,
   letterIssues,
   overlapWithCv,
   parseResearchFacts,
@@ -88,6 +89,7 @@ const profile: Profile = {
   remotePreference: "any",
   searchScope: "anywhere",
   workAuthorization: "",
+  sgWorkAuthorization: "",
   keywordsInclude: [],
   keywordsExclude: [],
   notifyMinScore: 70,
@@ -347,5 +349,43 @@ describe("parseResearchFacts", () => {
       { id: "F1", text: "Xendit provides payment infrastructure for businesses in Southeast Asia.", sources: [{ url: "https://www.xendit.co/en/about", title: "About Xendit" }] },
       { id: "F2", text: "It processes payments in Indonesia and the Philippines.", sources: [{ url: "https://docs.xendit.co", title: "https://docs.xendit.co" }] },
     ]);
+  });
+});
+
+describe("bullet guards against vague rewrites", () => {
+  it("rejects a rewrite that says what it demonstrates", () => {
+    const support: EvidenceItem[] = [
+      { id: "proj1.h", group: "proj1", entryKey: null, kind: "heading", section: "Projects", label: "domTraverse", text: "domTraverse | Next.js, React, Go, Docker, Azure", technologies: [] },
+      { id: "proj1.b1", group: "proj1", entryKey: null, kind: "bullet", section: "Projects", label: "domTraverse", text: "Built a DOM traversal visualizer that scrapes any target URL, parses raw markup into a real tree, and animates BFS and DFS walks step by step with a full visit/match log.", technologies: [] },
+    ];
+    const r = checkBullet("Built a DOM traversal visualizer using Next.js, React, and Go, demonstrating the ability to learn and adapt to new technologies.", support, 170);
+    expect(r.blocking.some((b) => /what it proves/.test(b))).toBe(true);
+    expect(checkBullet("Animated BFS and DFS walks over a DOM tree parsed from any URL, with a full visit log.", support, 170).blocking).toEqual([]);
+  });
+
+  it("measures how much concrete detail a rewrite keeps", () => {
+    const original = "Built a DOM traversal visualizer that scrapes any target URL, parses raw markup into a real tree, and animates BFS and DFS walks step by step.";
+    expect(detailRetention(original, "Built a DOM traversal visualizer using Next.js, React, and Go.").kept).toBeLessThan(0.6);
+    expect(detailRetention(original, "Animated BFS and DFS walks over a DOM tree parsed from any target URL.").kept).toBe(1);
+    expect(detailRetention("Shipped a feature for users.", "Shipped it.").kept).toBe(1);
+  });
+
+  it("reverts a rewrite that strips the original's specifics", () => {
+    const master = ["Built a DOM traversal visualizer that scrapes any target URL, parses raw markup into a real tree, and animates **BFS and DFS** walks step by step."];
+    const support: EvidenceItem[] = [
+      { id: "proj1.h", group: "proj1", entryKey: null, kind: "heading", section: "Projects", label: "domTraverse", text: "domTraverse | Next.js, React, Go", technologies: [] },
+      { id: "proj1.b1", group: "proj1", entryKey: null, kind: "bullet", section: "Projects", label: "domTraverse", text: master[0]!, technologies: [] },
+    ];
+    const { changes } = applyBulletProposals({
+      masterBullets: master,
+      group: "proj1",
+      support,
+      proposals: [{ text: "Built a web visualizer for tree structures in the browser.", from: [1], evidence_ids: ["proj1.b1"], requirement_ids: [], reason: "" }],
+      requirementIds: new Set(),
+      section: "Projects",
+      label: "domTraverse",
+    });
+    expect(changes[0]!.status).toBe("reverted");
+    expect(changes[0]!.issues.join(" ")).toMatch(/Drops concrete detail/);
   });
 });

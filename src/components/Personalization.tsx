@@ -9,13 +9,17 @@ import {
   STRENGTH_HINTS,
   STRENGTH_LABELS,
   type BulletChange,
+  type ClaimCheck,
   type CompanyFact,
   type EvidenceItem,
   type EvidenceStrength,
   type JobInsights,
   type JobRequirement,
+  type LetterCritique,
+  type LetterLintReport,
   type QualityReview,
   type RequirementMatch,
+  type RoleAnalysis,
   type TailoringStrategy,
 } from "../../shared/personalization";
 import type { Document, DocumentMeta } from "../../shared/types";
@@ -221,6 +225,7 @@ export function InsightsView({ insights, stale, onRefresh, disabled }: { insight
       <div className="group group-padded stack-v">
         <p>{insights.roleSummary}</p>
         {insights.companyContext && <p className="subhead muted">{insights.companyContext}</p>}
+        {insights.role && <RoleAnalysisView role={insights.role} />}
         <StrengthSummary matches={insights.matches} />
       </div>
       <Segmented
@@ -237,6 +242,7 @@ export function InsightsView({ insights, stale, onRefresh, disabled }: { insight
       {view === "requirements" && <RequirementMap requirements={insights.requirements} matches={insights.matches} evidence={insights.evidence} />}
       {view === "company" && <CompanyFacts facts={insights.companyFacts} research={insights.research} generator={insights.generator} />}
       <p className="caption muted">
+        {insights.matching === "semantic" ? "Evidence matched by meaning (open embeddings), then judged. " : ""}
         {insights.generator}, {relativeTime(insights.createdAt).toLowerCase()}. Gaps are shown so you can decide how to address them. Your documents never claim them.
       </p>
     </div>
@@ -359,11 +365,93 @@ export function BulletChanges({ changes, requirements, evidence }: { changes: Bu
   );
 }
 
+function RoleAnalysisView({ role }: { role: RoleAnalysis }) {
+  return (
+    <dl className="kv compact">
+      {role.coreProblems.length > 0 && (
+        <Detail label="Problems the team solves">
+          <ul className="evidence-list">
+            {role.coreProblems.map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+          </ul>
+        </Detail>
+      )}
+      {role.internScope && <Detail label="Intern scope">{role.internScope}</Detail>}
+      {role.implicitSignals.length > 0 && (
+        <Detail label="Unwritten signals">
+          <ul className="evidence-list">
+            {role.implicitSignals.map((s) => (
+              <li key={s.signal}>
+                {s.signal} <span className="caption muted">“{s.quote}”</span>
+              </li>
+            ))}
+          </ul>
+        </Detail>
+      )}
+      {role.companySignals.length > 0 && (
+        <Detail label="What they tend to weigh">
+          <span className="caption muted">From your company notes (config/companies.json). Used to pick evidence, never quoted.</span>
+          <ul className="evidence-list">
+            {role.companySignals.map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ul>
+        </Detail>
+      )}
+    </dl>
+  );
+}
+
+const SUPPORT_LABELS: Record<ClaimCheck["claims"][number]["support"], string> = { supported: "Supported", partial: "Overstated", unsupported: "Unsupported" };
+
+function ClaimVerification({ checks }: { checks: ClaimCheck[] }) {
+  const flagged = checks.filter((c) => c.claims.some((x) => x.support !== "supported"));
+  return (
+    <section className="section">
+      <div className="section-header">
+        <h2 className="section-title">Claim Check</h2>
+      </div>
+      {flagged.length === 0 ? (
+        <div className="notice">
+          <Icon name="check" />
+          <span>Every claim in the {checks.length} rewritten bullets is supported by your master CV and notes.</span>
+        </div>
+      ) : (
+        <div className="group">
+          {flagged.map((c, i) => (
+            <div key={i} className="row" style={{ alignItems: "flex-start" }}>
+              <div className="row-main">
+                <p className="row-title">
+                  {c.entryLabel} <span className="caption muted">{c.action === "reverted" ? "Reverted to your original bullet" : "Kept, check the wording"}</span>
+                </p>
+                <p className="row-subtitle">{c.bullet}</p>
+                <ul className="evidence-list">
+                  {c.claims
+                    .filter((x) => x.support !== "supported")
+                    .map((x, j) => (
+                      <li key={j}>
+                        <strong>{SUPPORT_LABELS[x.support]}:</strong> {x.claim}
+                        {x.problem && <span className="muted"> ({x.problem})</span>}
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="section-footer">Each rewritten bullet is checked claim by claim against its own entry's evidence. An unsupported claim puts your original bullet back.</p>
+    </section>
+  );
+}
+
 export function TailoringView({ meta }: { meta: DocumentMeta }) {
   const requirements = meta.requirements ?? [];
   const evidence = meta.evidence ?? [];
   return (
     <>
+      {meta.verification && meta.verification.length > 0 && <ClaimVerification checks={meta.verification} />}
       {meta.strategy && (
         <section className="section">
           <div className="section-header">
@@ -414,6 +502,79 @@ export function TailoringView({ meta }: { meta: DocumentMeta }) {
 
 // ---------- Cover letter ----------
 
+function LetterRules({ lint }: { lint: LetterLintReport }) {
+  return (
+    <section className="section">
+      <div className="section-header">
+        <h2 className="section-title">Writing Rules</h2>
+      </div>
+      {lint.ok ? (
+        <div className="notice">
+          <Icon name="check" />
+          <span>
+            Passes every rule: {lint.words} words, no dashes, semicolons or colons, no banned phrases, one concrete detail from you and from them in each paragraph.
+            {lint.attempts > 1 ? ` Took ${lint.attempts} drafts.` : ""}
+          </span>
+        </div>
+      ) : (
+        <div className="notice notice-warning">
+          <Icon name="warning" />
+          <span>
+            Still breaks {lint.violations.length} rule{lint.violations.length === 1 ? "" : "s"} after {lint.attempts} drafts. Fix these before sending:
+            <ul>
+              {lint.violations.map((v, i) => (
+                <li key={i}>
+                  {v.message}
+                  {v.quote && <span className="muted"> “{v.quote}”</span>}
+                </li>
+              ))}
+            </ul>
+          </span>
+        </div>
+      )}
+      <p className="section-footer">Rules and the banned-phrase list live in config/letter.json and config/banned_phrases.txt.</p>
+    </section>
+  );
+}
+
+function RecruiterCritique({ critique }: { critique: LetterCritique }) {
+  return (
+    <section className="section">
+      <div className="section-header">
+        <h2 className="section-title">Skeptical Recruiter</h2>
+      </div>
+      <div className="group group-padded stack-v">
+        <p>
+          <strong>{critique.verdict === "send" ? "Would forward it." : "Wanted changes."}</strong> {critique.summary}
+        </p>
+        {critique.flags.length > 0 && (
+          <ul className="evidence-list">
+            {critique.flags.map((f, i) => (
+              <li key={i}>
+                <span className="muted">“{f.quote}”</span> {f.problem} <em>{f.fix}</em>
+              </li>
+            ))}
+          </ul>
+        )}
+        {critique.strongestLine && (
+          <p className="subhead">
+            <span className="muted">Strongest line:</span> “{critique.strongestLine}”
+          </p>
+        )}
+        {critique.revised && critique.before && (
+          <details>
+            <summary className="subhead">The draft before this revision</summary>
+            <div className="prose subhead" style={{ whiteSpace: "pre-wrap", marginTop: 8 }}>
+              {critique.before}
+            </div>
+          </details>
+        )}
+      </div>
+      <p className="section-footer">{critique.revised ? "The letter you see was revised once from this critique." : "The letter wasn't revised: the revision broke more writing rules than the draft."}</p>
+    </section>
+  );
+}
+
 export function LetterReasoning({ meta }: { meta: DocumentMeta }) {
   const plan = meta.plan;
   if (!plan) return null;
@@ -423,6 +584,8 @@ export function LetterReasoning({ meta }: { meta: DocumentMeta }) {
   const placeholder = /^placeholder$/i.test(plan.motivation.trim());
   return (
     <>
+      {meta.lint && <LetterRules lint={meta.lint} />}
+      {meta.critique && <RecruiterCritique critique={meta.critique} />}
       <section className="section">
         <div className="section-header">
           <h2 className="section-title">The Case This Letter Makes</h2>
@@ -542,7 +705,8 @@ export function QualityReviewPanel({ review, running, onRun, id }: { review: Qua
           ))}
         </ul>
       )}
-      <div>
+      {review.scores.length > 0 && (
+        <div>
         <button type="button" className="btn-link" onClick={() => setShowScores(!showScores)} aria-expanded={showScores}>
           {showScores ? "Hide scores" : "Show scores"}
         </button>
@@ -562,7 +726,8 @@ export function QualityReviewPanel({ review, running, onRun, id }: { review: Qua
             ))}
           </div>
         )}
-      </div>
+        </div>
+      )}
       <p className="caption muted">
         {review.attempts > 1 ? "The first draft didn't pass review, so it was regenerated with the feedback. " : ""}
         Reviewed by {review.generator}, {relativeTime(review.reviewedAt).toLowerCase()}.
