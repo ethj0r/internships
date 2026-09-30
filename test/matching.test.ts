@@ -20,6 +20,7 @@ const baseProfile: Profile = {
   remotePreference: "any",
   searchScope: "anywhere",
   workAuthorization: "",
+  sgWorkAuthorization: "",
   keywordsInclude: [],
   keywordsExclude: [],
   notifyMinScore: 70,

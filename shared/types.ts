@@ -1,7 +1,12 @@
 // Types shared by the Worker API and the web client.
 
+import type { Eligibility, EligibilityStatus } from "./eligibility";
+import type { Tier } from "./priority";
 import type {
   BulletChange,
+  ClaimCheck,
+  LetterCritique,
+  LetterLintReport,
   CompanyFact,
   EvidenceItem,
   JobInsights,
@@ -84,6 +89,8 @@ export interface Profile {
   remotePreference: RemotePreference;
   searchScope: SearchScope;
   workAuthorization: string;
+  /** Singapore work authorization the candidate has confirmed. Empty: CVs and letters never claim one. */
+  sgWorkAuthorization: string;
   keywordsInclude: string[];
   keywordsExclude: string[];
   notifyMinScore: number;
@@ -112,7 +119,14 @@ export interface JobSummary {
   duplicateOf: number | null;
   dismissedAt: string | null;
   closedAt: string | null;
+  closedReason: string | null;
   application: ApplicationRef | null;
+  eligibilityStatus: EligibilityStatus;
+  eligibility: Eligibility | null;
+  priorityTier: Tier;
+  /** "summer_2027", "winter_2027", "2027"… */
+  season: string | null;
+  priorityScore: number;
 }
 
 export interface JobDetail extends JobSummary {
@@ -183,6 +197,13 @@ export interface DocumentMeta {
   /** What the candidate asked a cover letter to reflect. */
   angle?: string;
   review?: QualityReview;
+  /** Eligibility when the document was generated (drives the header and the letter's location sentence). */
+  eligibility?: { status: EligibilityStatus; reason: string; workAuthorizationNote: string | null };
+  /** Tailored CVs: claim-by-claim verification of rewritten bullets. */
+  verification?: ClaimCheck[];
+  /** Cover letters: mechanical lint and the recruiter critique. */
+  lint?: LetterLintReport;
+  critique?: LetterCritique;
 }
 
 export interface DocumentSummary {
@@ -246,6 +267,45 @@ export interface DiscoveryRun {
   jobsSeen: number;
   jobsNew: number;
   errors: { source: string; message: string }[];
+}
+
+export interface RefreshSummary {
+  newPostings: number;
+  changedPostings: number;
+  closedPostings: number;
+  /** New or changed postings classified during the cycle, by status. */
+  byStatus: Partial<Record<EligibilityStatus, number>>;
+  /** Open postings by status at the end of the cycle. */
+  openByStatus: Partial<Record<EligibilityStatus, number>>;
+  /** New eligible Summer 2027 postings at tier 1–3 companies. */
+  topNew: { id: number; company: string; title: string; status: EligibilityStatus; tier: Tier }[];
+  errors: { source: string; message: string }[];
+}
+
+export interface RefreshCycle {
+  id: number;
+  trigger: "cron" | "manual";
+  startedAt: string;
+  finishedAt: string | null;
+  sourcesTotal: number;
+  sourcesChecked: number;
+  jobsNew: number;
+  jobsChanged: number;
+  jobsClosed: number;
+  summary: RefreshSummary | null;
+}
+
+/** A big tech career page that isn't crawled (config/watchlist.json). */
+export interface WatchlistSite {
+  company: string;
+  tier: number;
+  label: string;
+  url: string;
+}
+
+export interface ShortlistGroup {
+  status: EligibilityStatus;
+  jobs: JobSummary[];
 }
 
 export interface Overview {

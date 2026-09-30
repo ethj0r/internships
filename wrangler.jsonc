@@ -22,7 +22,8 @@
     }
   ],
 
-  // Workers AI: CV file → Markdown conversion, and the default LLM when no ANTHROPIC_API_KEY is set.
+  // Workers AI: CV file → Markdown conversion, embeddings, the default model (gpt-oss-120b) and the fallback for
+  // every other option in config/models.json.
   "ai": { "binding": "AI", "remote": true },
 
   // Brute-force protection for the single-owner login.
@@ -35,14 +36,24 @@
   ],
 
   "triggers": {
-    // Hourly: discovery (round-robin over sources). Daily 07:00 UTC: deadline reminders.
+    // Hourly: continues or starts a refresh cycle (a new one only when REFRESH_INTERVAL_HOURS have passed since the
+    // last one started; see worker/discovery/refresh.ts). Daily 07:00 UTC: deadline reminders.
     "crons": ["0 * * * *", "0 7 * * *"]
   },
 
   "vars": {
-    "AI_PROVIDER": "auto",
-    "DISCOVERY_SOURCES_PER_RUN": "6",
-    "DISCOVERY_MAX_DETAIL_FETCHES": "25"
+    // Default model for analysis and writing: an option id from config/models.json. Can be changed per document in
+    // the app. Options that need a key (NVIDIA: LLM_API_KEY, Claude: ANTHROPIC_API_KEY) appear once it's set.
+    "AI_MODEL": "workers-gpt-oss",
+    // Workers AI fallbacks for every option, and the models behind "workers-gpt-oss".
+    "WORKERS_AI_STRONG_MODEL": "@cf/openai/gpt-oss-120b",
+    "WORKERS_AI_FAST_MODEL": "@cf/qwen/qwen3-30b-a3b-fp8",
+    "EMBEDDING_MODEL": "@cf/baai/bge-m3",
+    "REFRESH_INTERVAL_HOURS": "72",
+    "DISCOVERY_SOURCES_PER_RUN": "8",
+    "DISCOVERY_MAX_DETAIL_FETCHES": "25",
+    // Eligibility classifications by the fast model per cron run.
+    "ELIGIBILITY_MODEL_CALLS_PER_RUN": "20"
   },
 
   "observability": {

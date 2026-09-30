@@ -1,0 +1,121 @@
+# Phrases a cover letter must not contain. The lint step rejects and regenerates any letter that uses one.
+# One entry per line, matched case-insensitively on word boundaries. Lines starting with # are comments.
+# Prefix a line with "re:" for a regular expression (JavaScript syntax, case-insensitive).
+# Edit freely; changes apply on the next build (npm run dev reloads automatically).
+
+# Openers and enthusiasm
+i am excited to apply
+i'm excited to apply
+excited to apply
+i am thrilled
+i'm thrilled
+thrilled
+i am writing to apply
+i am writing to express
+i'm writing to apply
+i am passionate about
+i'm passionate about
+passionate about
+my passion for
+dream job
+eager to contribute
+keen interest
+i am confident that
+i believe i would be
+
+# Corporate filler
+leverage
+leveraging
+delve
+delving
+tapestry
+testament
+landscape
+fast-paced
+dynamic
+synergy
+synergies
+cutting-edge
+state-of-the-art
+proven track record
+track record of
+results-driven
+team player
+self-starter
+detail-oriented
+go-getter
+hit the ground running
+think outside the box
+in today's world
+in today's fast
+ever-evolving
+ever-changing
+game-changer
+game changer
+world-class
+unique opportunity
+perfect fit
+ideal candidate
+wealth of experience
+make a meaningful impact
+meaningful impact
+align with
+aligns with
+aligns perfectly
+resonates with me
+deeply resonates
+invaluable
+seamless
+seamlessly
+robust
+furthermore
+moreover
+additionally
+honed
+journey
+navigate
+navigating
+realm
+embark
+foster
+spearhead
+elevate
+unwavering
+commitment to excellence
+at the intersection of
+harness
+harnessing
+empower
+empowering
+
+# Empty flattery and restating closers
+innovative company
+industry leader
+renowned
+esteemed
+i would welcome the opportunity
+i look forward to the opportunity
+thank you for considering my application
+thank you for your time and consideration
+in conclusion
+in summary
+to sum up
+
+# Structures
+re:\bnot only\b[^.]{1,80}\bbut also\b
+re:\bit(?:'s| is) not (?:just|only|merely) [^.]{1,60}[,.] it(?:'s| is)\b
+re:\bnot just [^.]{1,40}, but\b
+re:\bmore than just\b
+
+# Self-assessment: let the work show it (found in the 2026-09-28 evaluation)
+re:\b(?:showing|shows|show|proving|proves|prove|demonstrating|demonstrates|demonstrate|reflecting|reflects)(?: that)? I (?:can|am able|have the ability)\b
+re:\bthese (?:experiences|projects|skills) (?:prove|show|demonstrate|taught|have prepared)\b
+re:\b(?:my|the) ability to (?:learn|adapt|deliver|communicate)\b
+engineering culture
+re:\bmirror(?:s|ed|ing)?\b
+production-grade
+reputation for
+extensive experience
+re:\b(?:improv|enhanc)\w* (?:your|the company's|their) (?:fraud|security|platform)\b
+re:,\s*(?:demonstrating|showcasing|highlighting|proving|underscoring)\b
+re:\b(?:matching|meeting|fitting) (?:\w+['’]s )?(?:demand|need|expectation)s? for

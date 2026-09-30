@@ -3,9 +3,12 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { Source, SourceKind } from "../../shared/types";
 import { adapterFor } from "../discovery/registry";
-import { runDiscovery } from "../discovery/run";
-import { eventStmt, getProfile, parseJson } from "../lib/db";
-import { scopeFilter } from "../lib/scope";
+import watchlist from "../../config/watchlist.json";
+import { listCycles, runScheduledRefresh } from "../discovery/refresh";
+import { intVar, runDiscovery } from "../discovery/run";
+import { classifyPending } from "../eligibility/classify";
+import { eventStmt, parseJson } from "../lib/db";
+import { visibleFilter } from "../lib/scope";
 import { idParam, notFound, readJson, type AppEnv } from "../lib/validate";
 
 export const sources = new Hono<AppEnv>();
@@ -26,7 +29,7 @@ interface SourceRow {
 
 /** Sources with their open, in-search-area job counts. `tail` is appended after FROM (WHERE / ORDER BY). */
 async function querySources(db: D1Database, tail: string, ...binds: (string | number)[]): Promise<SourceRow[]> {
-  const scope = scopeFilter((await getProfile(db)).searchScope);
+  const scope = visibleFilter();
   const { results } = await db
     .prepare(
       `SELECT s.*, (SELECT COUNT(*) FROM jobs j WHERE j.source_id = s.id AND j.closed_at IS NULL AND j.duplicate_of IS NULL${scope ? ` AND ${scope.sql}` : ""}) AS job_count
@@ -143,9 +146,24 @@ sources.delete("/:id", async (c) => {
   return c.body(null, 204);
 });
 
-sources.post("/:id/run", async (c) => c.json(await runDiscovery(c.env, { trigger: "manual", sourceIds: [idParam(c)] })));
+/** A manual check also classifies what it found, so the results are ready to review. */
+async function checkNow(env: Env, sourceIds?: number[]) {
+  const run = await runDiscovery(env, { trigger: "manual", sourceIds });
+  const eligibility = await classifyPending(env, { modelBudget: intVar(env.ELIGIBILITY_MODEL_CALLS_PER_RUN, 20, 0, 200) });
+  return { ...run, classified: eligibility.classified };
+}
 
-discovery.post("/run", async (c) => c.json(await runDiscovery(c.env, { trigger: "manual" })));
+sources.post("/:id/run", async (c) => c.json(await checkNow(c.env, [idParam(c)])));
+
+discovery.post("/run", async (c) => c.json(await checkNow(c.env)));
+
+/** Starts a refresh cycle now instead of waiting for the next one to be due. */
+discovery.post("/refresh", async (c) => c.json(await runScheduledRefresh(c.env, { trigger: "manual", force: true })));
+
+discovery.get("/cycles", async (c) => c.json(await listCycles(c.env.DB)));
+
+/** Big tech career pages that aren't crawled (config/watchlist.json): checked by hand, postings imported by URL or pasted. */
+discovery.get("/watchlist", (c) => c.json(watchlist.sites));
 
 discovery.get("/runs", async (c) => {
   const { results } = await c.env.DB.prepare("SELECT * FROM discovery_runs ORDER BY id DESC LIMIT 20").all<{

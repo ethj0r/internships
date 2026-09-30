@@ -27,10 +27,11 @@ Technically possible, but not appropriate as a default:
 
 | Step | Automated? |
 | --- | --- |
-| Finding new internships across sources | Yes, hourly |
+| Finding new internships across sources | Yes, every 3 days (a refresh cycle spread over hourly runs) |
+| Location and work-mode eligibility | Yes, before anything else; ambiguous postings wait for your approval |
 | Filtering, deduplicating and ranking by fit | Yes |
 | Extracting requirements, deadline, workplace | Yes |
-| Role analysis: requirement → evidence map, strategy, cited company research | Yes, on request or before the first document |
+| Role analysis: requirements, semantic evidence map, strategy | Yes, on request or before the first document, for eligible postings only |
 | Tailored CV, cover letter, application answers | Drafted on request, **approved by you** |
 | Fabrication checks on drafts | Yes, as warnings |
 | Checklist, links and copy-ready materials | Yes (Apply Kit) |

@@ -1,0 +1,46 @@
+{
+  "$comment": "Models you can pick when generating a CV, cover letter, answers or role analysis. The default is the wrangler var AI_MODEL. `provider`: workers-ai (the AI binding), openai (any OpenAI-compatible API at baseUrl, key from the secret named in keyEnv) or claude. `strong` runs analysis and writing; `fast` runs cheap steps (claim checks, eligibility); a null `fast` uses WORKERS_AI_FAST_MODEL. Every option falls back to WORKERS_AI_STRONG_MODEL / WORKERS_AI_FAST_MODEL when its API fails. Options whose key isn't set are hidden. Timings measured 2026-09-28; see docs/models.md.",
+  "options": [
+    {
+      "id": "workers-gpt-oss",
+      "label": "gpt-oss-120b",
+      "host": "Workers AI",
+      "note": "Fastest: about 3 minutes for a CV and cover letter. Free daily quota covers roughly 1–3 jobs a day.",
+      "provider": "workers-ai",
+      "strong": "@cf/openai/gpt-oss-120b",
+      "fast": "@cf/qwen/qwen3-30b-a3b-fp8"
+    },
+    {
+      "id": "nvidia-glm-5.3-flash",
+      "label": "GLM-5.3-Flash",
+      "host": "NVIDIA (free)",
+      "note": "Better writing, free, no daily cap. The free queue takes 1–5 minutes per step, so a CV and letter can take 20 minutes or more.",
+      "provider": "openai",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "keyEnv": "LLM_API_KEY",
+      "strong": "z-ai/glm-5.3-flash",
+      "fast": null
+    },
+    {
+      "id": "nvidia-glm-5.3",
+      "label": "GLM-5.3",
+      "host": "NVIDIA (free)",
+      "note": "The strongest open model here, but it didn't respond on the free tier in testing. Falls back to gpt-oss-120b.",
+      "provider": "openai",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "keyEnv": "LLM_API_KEY",
+      "strong": "z-ai/glm-5.3",
+      "fast": null
+    },
+    {
+      "id": "claude",
+      "label": "Claude Opus 5",
+      "host": "Anthropic (paid)",
+      "note": "Paid. Also researches the company with cited web sources.",
+      "provider": "claude",
+      "keyEnv": "ANTHROPIC_API_KEY",
+      "strong": "claude-opus-5",
+      "fast": "claude-opus-5"
+    }
+  ]
+}

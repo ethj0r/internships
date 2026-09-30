@@ -134,8 +134,28 @@ export interface TailoringStrategy {
   coverLetterAngle: string;
 }
 
+/** What the job really is, analysed before looking at the candidate (prompts/role_analysis.md). */
+export interface RoleAnalysis {
+  coreProblems: string[];
+  internScope: string;
+  /** Traits the posting signals without listing them, with the phrase that implies each. */
+  implicitSignals: { signal: string; quote: string }[];
+  /** What this company's interviewers weigh (config/companies.json); steers selection, never quoted. */
+  companySignals: string[];
+}
+
+/** Semantic retrieval behind the evidence map: the closest evidence per requirement, with cosine similarity. */
+export interface RequirementRetrieval {
+  requirementId: string;
+  candidates: { id: string; score: number }[];
+}
+
 export interface JobInsights {
   version: number;
+  role?: RoleAnalysis;
+  /** "semantic": embeddings proposed candidates for the judge; "llm": the judge read the whole knowledge base. */
+  matching?: "semantic" | "llm";
+  retrieval?: RequirementRetrieval[];
   roleSummary: string;
   companyContext: string;
   requirements: JobRequirement[];
@@ -183,6 +203,8 @@ export interface NarrativeStep {
 }
 
 export interface LetterPlan {
+  opening?: string;
+  locationSentence?: string;
   companyNeed: string;
   whyRole: string;
   whyCompany: string;
@@ -190,6 +212,36 @@ export interface LetterPlan {
   narrative: NarrativeStep[];
   contribution: string;
   motivation: string;
+}
+
+/** Mechanical cover-letter checks (worker/letters/lint.ts). */
+export interface LetterLintReport {
+  ok: boolean;
+  words: number;
+  /** Drafts written before one passed (or the limit was reached). */
+  attempts: number;
+  violations: { rule: string; message: string; quote: string }[];
+  warnings: { rule: string; message: string; quote: string }[];
+}
+
+/** The skeptical-recruiter pass (prompts/letter_critique.md) and whether the letter was revised from it. */
+export interface LetterCritique {
+  flags: { quote: string; problem: string; fix: string }[];
+  strongestLine: string;
+  verdict: "send" | "revise";
+  summary: string;
+  revised: boolean;
+  /** The draft before revision, for comparison. */
+  before?: string;
+}
+
+/** Claim-by-claim check of a rewritten CV bullet against its evidence (prompts/cv_verify.md). */
+export interface ClaimCheck {
+  entryLabel: string;
+  bullet: string;
+  claims: { claim: string; support: "supported" | "partial" | "unsupported"; evidenceIds: string[]; problem: string }[];
+  /** "reverted": an unsupported claim, so the master CV's bullet was used instead. */
+  action: "kept" | "reverted";
 }
 
 export const CV_CRITERIA = ["relevance", "evidence", "credibility", "clarity", "impact", "ats", "keywords", "consistency", "truthfulness"] as const;

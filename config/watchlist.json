@@ -1,0 +1,18 @@
+{
+  "$comment": "Career sites without a public job feed, or whose terms don't allow automated collection, so they're not crawled. The app lists these search pages on Discover; open one, and import a posting you like by pasting its URL (Add Job). Links checked 2026-09-28; filters on these sites change, so adjust the URLs if a search looks wrong.",
+  "sites": [
+    { "company": "Google", "tier": 1, "label": "Singapore internships", "url": "https://www.google.com/about/careers/applications/jobs/results/?location=Singapore&target_level=INTERN_AND_APPRENTICE" },
+    { "company": "Amazon / AWS", "tier": 1, "label": "Internships in Singapore", "url": "https://www.amazon.jobs/en/search?base_query=intern&loc_query=Singapore" },
+    { "company": "Microsoft", "tier": 1, "label": "Students and graduates, Singapore", "url": "https://jobs.careers.microsoft.com/global/en/search?lc=Singapore&exp=Students%20and%20graduates" },
+    { "company": "Meta", "tier": 1, "label": "Internships, Singapore", "url": "https://www.metacareers.com/jobs?offices%5B0%5D=Singapore&roles%5B0%5D=Internship" },
+    { "company": "Apple", "tier": 1, "label": "Internships, Singapore", "url": "https://jobs.apple.com/en-sg/search?location=singapore-SGP&team=internships-STDNT-INTRN" },
+    { "company": "TikTok", "tier": 1, "label": "Intern roles, Singapore", "url": "https://lifeattiktok.com/search?keyword=intern%20singapore" },
+    { "company": "ByteDance", "tier": 1, "label": "Intern roles", "url": "https://jobs.bytedance.com/en/position?keywords=intern" },
+    { "company": "NVIDIA", "tier": 1, "label": "Intern roles", "url": "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite?q=intern" },
+    { "company": "Shopee (Sea)", "tier": 2, "label": "Student programmes", "url": "https://careers.shopee.sg/students" },
+    { "company": "Sea Group", "tier": 2, "label": "Careers", "url": "https://www.sea.com/careers" },
+    { "company": "Grab", "tier": 2, "label": "Intern roles (also on the Grab source)", "url": "https://www.grab.careers/en/jobs/?search=intern" },
+    { "company": "GoTo (Gojek, Tokopedia)", "tier": 2, "label": "Careers", "url": "https://www.gotocompany.com/en/careers" },
+    { "company": "Traveloka", "tier": 2, "label": "Careers", "url": "https://www.traveloka.com/en-id/careers" }
+  ]
+}

@@ -32,7 +32,7 @@ export function AppShell({ onSignOut }: { onSignOut: () => void }) {
       <nav className="sidebar" aria-label="Main">
         <div className="brand">
           <AppMark className="brand-mark" />
-          Internships
+          Sietch
         </div>
         {NAV.map((item) => (
           <NavLink key={item.to} to={item.to} className="nav-item">

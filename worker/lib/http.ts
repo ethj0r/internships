@@ -7,7 +7,7 @@ export class HttpError extends Error {
   }
 }
 
-const USER_AGENT = "InternshipsTracker/1.0 (personal internship search; +https://github.com/ethj0r/internships)";
+const USER_AGENT = "Sietch/1.0 (personal internship search; +https://github.com/ethj0r/sietch)";
 
 export async function fetchJson<T>(url: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   const { timeoutMs = 25_000, headers, ...rest } = init;

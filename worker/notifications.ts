@@ -1,6 +1,5 @@
 import type { Notification } from "../shared/types";
-import { getProfile } from "./lib/db";
-import { scopeFilter } from "./lib/scope";
+import { visibleFilter } from "./lib/scope";
 
 export function notificationStmt(
   db: D1Database,
@@ -23,7 +22,7 @@ function addDays(date: Date, days: number): string {
 export async function runDeadlineReminders(env: Env): Promise<number> {
   const today = new Date();
   const todayStr = today.toISOString().slice(0, 10);
-  const scope = scopeFilter((await getProfile(env.DB)).searchScope);
+  const scope = visibleFilter();
   const { results } = await env.DB.prepare(
     `SELECT j.id, j.company, j.title, j.deadline
      FROM jobs j

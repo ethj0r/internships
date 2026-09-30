@@ -14,6 +14,8 @@ export interface RawJob {
   descriptionHtml?: string;
   descriptionText?: string;
   postedAt?: string | null;
+  /** The platform's last-updated timestamp, when listings include one. */
+  updatedAt?: string | null;
   deadline?: string | null;
 }
 

@@ -8,6 +8,10 @@ APP_PASSWORD=change-me
 # Generate with: node -e "console.log(crypto.randomBytes(32).toString('hex'))"
 SESSION_SECRET=replace-with-a-long-random-string
 
-# Optional. When set, Claude (claude-opus-5) is used for analysis and document generation.
-# When unset, Workers AI is used instead.
+# Optional. Unlocks the NVIDIA options in the model picker (config/models.json): GLM-5.3-Flash and GLM-5.3 on
+# NVIDIA's free API. Sign in at https://build.nvidia.com, then "Get API Key" (starts with nvapi-).
+# Without it, only Workers AI models are offered.
+# LLM_API_KEY=
+
+# Optional, paid. Unlocks the Claude option in the model picker.
 # ANTHROPIC_API_KEY=

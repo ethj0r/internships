@@ -22,7 +22,8 @@ npm run db:migrate:remote
 # 3. Set secrets (you'll be prompted for each value)
 npx wrangler secret put APP_PASSWORD
 npx wrangler secret put SESSION_SECRET      # 32+ random characters
-npx wrangler secret put ANTHROPIC_API_KEY   # optional, enables Claude
+npx wrangler secret put LLM_API_KEY         # optional, adds the NVIDIA models to the model menu
+npx wrangler secret put ANTHROPIC_API_KEY   # optional, paid, adds Claude
 
 # 4. Build and deploy
 npm run deploy
@@ -52,7 +53,7 @@ Defined in `wrangler.jsonc`:
 
 | Cron | Job |
 | --- | --- |
-| `0 * * * *` | Discovery: checks the next `DISCOVERY_SOURCES_PER_RUN` sources |
+| `0 * * * *` | Refresh cycles: starts a cycle every `REFRESH_INTERVAL_HOURS`, checks the next `DISCOVERY_SOURCES_PER_RUN` sources of the running cycle, classifies eligibility; idle otherwise |
 | `0 7 * * *` | Deadline reminders |
 
 Test locally with `npx wrangler dev --test-scheduled` and `curl "http://localhost:8787/__scheduled?cron=0+*+*+*+*"`.
@@ -63,9 +64,12 @@ Test locally with `npx wrangler dev --test-scheduled` and `curl "http://localhos
 | --- | --- | --- | --- |
 | `APP_PASSWORD` | Secret | — | Owner password. Required. |
 | `SESSION_SECRET` | Secret | — | HMAC key for session cookies, 16+ characters (32+ recommended). Changing it signs everyone out. |
-| `ANTHROPIC_API_KEY` | Secret | — | Optional. Uses `claude-opus-5` for analysis and writing. |
-| `AI_PROVIDER` | Var | `auto` | `auto` uses Claude if a key is set, otherwise Workers AI. `workers-ai` forces Workers AI. |
-| `DISCOVERY_SOURCES_PER_RUN` | Var | `6` | Sources checked per hourly run. |
+| `LLM_API_KEY` | Secret | — | Optional. NVIDIA free API key; adds GLM-5.3-Flash and GLM-5.3 to the model menu. |
+| `ANTHROPIC_API_KEY` | Secret | — | Optional, paid. Adds Claude to the model menu. |
+| `AI_MODEL` | Var | `workers-gpt-oss` | Default model option from `config/models.json`; each document can pick another in the app. See [models.md](models.md). |
+| `REFRESH_INTERVAL_HOURS` | Var | `72` | Hours between refresh cycles. |
+| `ELIGIBILITY_MODEL_CALLS_PER_RUN` | Var | `20` | Fast-model eligibility checks per cron run. |
+| `DISCOVERY_SOURCES_PER_RUN` | Var | `8` | Sources checked per hourly run during a refresh cycle. |
 | `DISCOVERY_MAX_DETAIL_FETCHES` | Var | `25` | Full-description fetches per run (Greenhouse). |
 
 ## Limits and plans

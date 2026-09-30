@@ -1,0 +1,11 @@
+{
+  "$comment": "Cover letter rules enforced by the lint step (worker/letters/lint.ts). Banned phrases live in banned_phrases.txt.",
+  "minWords": 200,
+  "maxWords": 280,
+  "maxLintAttempts": 3,
+  "maxRecruiterRevisions": 1,
+  "banEmDash": true,
+  "banSemicolon": true,
+  "banColonInProse": true,
+  "banExclamation": true
+}

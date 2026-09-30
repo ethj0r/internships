@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { isLatexCv } from "../../shared/cv";
 import { rescoreAll } from "../discovery/run";
+import { withModel } from "../ai/provider";
 import { generateAnswers, generateCoverLetter, generateTailoredCv, metaAfterEdit, reviewDocument } from "../documents/generate";
 import {
   DOCUMENT_SUMMARY_SELECT,
@@ -98,21 +99,22 @@ documents.post("/master", async (c) => {
   return c.json(await getDocument(db, row.id), 201);
 });
 
-const JobBody = z.object({ jobId: z.number().int().positive() });
+// `model`: an option id from config/models.json (GET /api/models); the AI_MODEL default when omitted.
+const JobBody = z.object({ jobId: z.number().int().positive(), model: z.string().max(80).optional() });
 
 documents.post("/tailor", async (c) => {
-  const { jobId } = await readJson(c, JobBody);
-  return c.json(await getDocument(c.env.DB, await generateTailoredCv(c.env, jobId)), 201);
+  const { jobId, model } = await readJson(c, JobBody);
+  return c.json(await getDocument(c.env.DB, await generateTailoredCv(withModel(c.env, model), jobId)), 201);
 });
 
 documents.post("/cover-letter", async (c) => {
-  const { jobId, angle } = await readJson(c, JobBody.extend({ angle: z.string().max(1000).optional() }));
-  return c.json(await getDocument(c.env.DB, await generateCoverLetter(c.env, jobId, angle)), 201);
+  const { jobId, angle, model } = await readJson(c, JobBody.extend({ angle: z.string().max(1000).optional() }));
+  return c.json(await getDocument(c.env.DB, await generateCoverLetter(withModel(c.env, model), jobId, angle)), 201);
 });
 
 documents.post("/answers", async (c) => {
-  const { jobId, questions } = await readJson(c, JobBody.extend({ questions: z.array(z.string().max(500)).max(10).optional() }));
-  return c.json(await getDocument(c.env.DB, await generateAnswers(c.env, jobId, questions)), 201);
+  const { jobId, questions, model } = await readJson(c, JobBody.extend({ questions: z.array(z.string().max(500)).max(10).optional() }));
+  return c.json(await getDocument(c.env.DB, await generateAnswers(withModel(c.env, model), jobId, questions)), 201);
 });
 
 async function documentWithParent(db: D1Database, id: number) {
@@ -129,7 +131,8 @@ documents.get("/:id", async (c) => c.json(await documentWithParent(c.env.DB, idP
 
 documents.post("/:id/review", async (c) => {
   const id = idParam(c);
-  await reviewDocument(c.env, id);
+  const { model } = await readJson(c, z.object({ model: z.string().max(80).optional() }));
+  await reviewDocument(withModel(c.env, model), id);
   return c.json(await documentWithParent(c.env.DB, id));
 });
 

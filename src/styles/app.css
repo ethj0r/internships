@@ -2509,3 +2509,100 @@ button.row {
     min-height: 0;
   }
 }
+
+/* ---------- Eligibility ---------- */
+
+.elig-remote {
+  background: var(--color-green-fill);
+  color: var(--color-green);
+}
+
+.elig-indonesia {
+  background: var(--color-teal-fill);
+  color: var(--color-teal);
+}
+
+.elig-singapore {
+  background: var(--color-indigo-fill);
+  color: var(--color-indigo);
+}
+
+.elig-check {
+  background: var(--color-orange-fill);
+  color: var(--color-orange);
+}
+
+.elig-excluded,
+.elig-unknown {
+  background: var(--color-gray-fill);
+  color: var(--color-label-secondary);
+}
+
+.tier-1 {
+  background: var(--color-yellow-fill);
+  color: var(--color-label);
+}
+
+.job-row-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.job-row-tags .tag {
+  height: 20px;
+  padding: 0 7px;
+  font: var(--type-caption);
+}
+
+.list-group-title {
+  margin: 14px 16px 4px;
+  font: var(--type-caption);
+  font-weight: 600;
+  color: var(--color-label-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.elig-quote {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--color-orange);
+  background: var(--color-fill-subtle);
+  border-radius: var(--radius-sm);
+  font: var(--type-subhead);
+}
+
+.elig-details summary {
+  cursor: pointer;
+}
+
+.elig-details ul,
+.watchlist-links {
+  margin: 8px 0 0;
+  padding-left: 1.1em;
+  font: var(--type-subhead);
+}
+
+.watchlist-links li + li {
+  margin-top: 4px;
+}
+
+/* ---------- Model picker ---------- */
+
+.model-picker {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 12px;
+}
+
+.model-picker .select {
+  max-width: 320px;
+}
+
+.model-picker .caption {
+  grid-column: 1 / -1;
+}

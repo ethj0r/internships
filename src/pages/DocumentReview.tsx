@@ -9,6 +9,7 @@ import { Icon, Spinner } from "../components/Icon";
 import { MenuButton, type MenuItem } from "../components/Menu";
 import { LetterReasoning, QualityReviewPanel, TailoringView, useExportGuard } from "../components/Personalization";
 import { Sheet } from "../components/Sheet";
+import { useModelChoice } from "../components/ModelPicker";
 import { useToast } from "../components/Toast";
 import { api } from "../lib/api";
 import { downloadTex, openInOverleaf, texFilename } from "../lib/cvExport";
@@ -25,6 +26,8 @@ export function DocumentReview() {
   const [mode, setMode] = useState<Mode | null>(null);
   const [draft, setDraft] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Reviews run on the model last picked on a job page.
+  const modelChoice = useModelChoice();
   useDocumentTitle(doc?.title);
 
   const content = draft ?? doc?.content ?? "";
@@ -72,7 +75,7 @@ export function DocumentReview() {
   const [runReview, reviewing] = useAction(async () => {
     if (!doc) return;
     if (dirty && !(await save())) return;
-    const updated = await api.reviewDocument(doc.id);
+    const updated = await api.reviewDocument(doc.id, modelChoice.model);
     afterChange(updated);
     toast.show(updated.meta.review?.verdict === "ready" ? "Ready to send" : "The review found things to fix");
   }, toast.error);

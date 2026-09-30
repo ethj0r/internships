@@ -1,12 +1,17 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { APPLICATION_STATUSES, type ApplicationStatus, type AuditEvent, type Notification, type Overview } from "../../shared/types";
-import { aiProviderName } from "../ai/provider";
+import { aiProviderName, modelOptions } from "../ai/provider";
 import { getActiveMasterCv, getProfile, JOB_SUMMARY_SELECT, nowIso, parseJson, placeholders, toJobSummary, type JobRow } from "../lib/db";
-import { scopeFilter } from "../lib/scope";
+import { visibleFilter } from "../lib/scope";
 import { readJson, type AppEnv } from "../lib/validate";
 
 export const activity = new Hono<AppEnv>();
+
+/** Models the user can pick for generation (config/models.json), the default flagged. */
+activity.get("/models", (c) =>
+  c.json(modelOptions(c.env).map(({ id, label, host, note, isDefault }) => ({ id, label, host, note, isDefault }))),
+);
 
 activity.get("/overview", async (c) => {
   const db = c.env.DB;
@@ -15,7 +20,7 @@ activity.get("/overview", async (c) => {
   const weekAgo = new Date(today.getTime() - 7 * 86_400_000).toISOString();
   const [profile, cv] = await Promise.all([getProfile(db), getActiveMasterCv(db)]);
   // Untracked jobs only count inside the search area.
-  const scope = scopeFilter(profile.searchScope);
+  const scope = visibleFilter();
   const inArea = scope ? ` AND ${scope.sql}` : "";
   const areaParams = scope?.params ?? [];
 

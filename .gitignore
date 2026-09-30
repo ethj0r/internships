@@ -24,3 +24,10 @@ exports/
 !.vscode/extensions.json
 .idea/
 *.log
+
+# Evaluation outputs contain the CV
+eval/runs/
+
+# Personal writing samples for the cover letter voice
+voice_samples/*
+!voice_samples/README.md
