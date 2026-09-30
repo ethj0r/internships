@@ -112,5 +112,10 @@ re:\b(?:showing|shows|show|proving|proves|prove|demonstrating|demonstrates|demon
 re:\bthese (?:experiences|projects|skills) (?:prove|show|demonstrate|taught|have prepared)\b
 re:\b(?:my|the) ability to (?:learn|adapt|deliver|communicate)\b
 engineering culture
-re:\bmirror(?:s|ing)? (?:the|your|their)\b
+re:\bmirror(?:s|ed|ing)?\b
 production-grade
+reputation for
+extensive experience
+re:\b(?:improv|enhanc)\w* (?:your|the company's|their) (?:fraud|security|platform)\b
+re:,\s*(?:demonstrating|showcasing|highlighting|proving|underscoring)\b
+re:\b(?:matching|meeting|fitting) (?:\w+['’]s )?(?:demand|need|expectation)s? for

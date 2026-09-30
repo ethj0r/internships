@@ -208,7 +208,13 @@ The highest-risk document for sounding machine-written, so it gets the most mach
    - doesn't name the company;
    - spends more than one sentence on location, or mentions a work pass, visa or authorization that isn't confirmed
      on your profile;
-   - has a paragraph without a concrete detail from your experience **and** one about this company or role.
+   - has a paragraph without a concrete detail from your experience **and** one about this company or role;
+   - makes a claim your evidence or the posting doesn't support. A fast model fact-checks every draft
+     ([`prompts/letter_verify.md`](../worker/prompts/letter_verify.md)) and each finding must quote the letter. The
+     2026-09-30 evaluation caught gpt-oss inventing "validation against a labeled test set" and "a report that informed
+     the team's decision", which the mechanical rules alone let through.
+
+   Unicode hyphens (U+2010–2012) are normalized first, so "production‑grade" can't slip past the banned list.
 4. **Skeptical recruiter** ([`prompts/letter_critique.md`](../worker/prompts/letter_critique.md)): a persona who has
    read ten thousand letters flags machine-written tells, generic lines, flattery, unsupported claims and anything said
    about the company that the posting doesn't state, quoting each, with a fix. The letter is **revised once** from the critique

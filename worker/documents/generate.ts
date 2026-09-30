@@ -26,7 +26,7 @@ import {
   type CvItem,
   type CvSection,
 } from "../../shared/cv";
-import { canGenerate, ELIGIBILITY_LABELS, type EligibilityStatus } from "../../shared/eligibility";
+import { canGenerate, ELIGIBILITY_LABELS, quoteAppears, type EligibilityStatus } from "../../shared/eligibility";
 import {
   COVER_LETTER_CRITERIA,
   CV_CRITERIA,
@@ -61,6 +61,8 @@ import {
   letterRevisePrompt,
   LetterReviewSchema,
   LetterSchema,
+  letterVerifyPrompt,
+  LetterVerifySchema,
   renderAnswersMarkdown,
   reviewPrompt,
   tailorCvFromTextPrompt,
@@ -68,7 +70,7 @@ import {
   type LetterInput,
 } from "../ai/prompts";
 import { AiError, compactPrompts, generateJson } from "../ai/provider";
-import { LETTER_RULES, lintFeedback, lintLetter, locationGuidance, type LintContext, type LintResult } from "../letters/lint";
+import { LETTER_RULES, lintFeedback, lintLetter, locationGuidance, normalizeHyphens, type LintContext, type LintResult } from "../letters/lint";
 import { voiceBlock } from "../letters/voice";
 import { eventStmt, getDocument, getLatestJobDocument, getProfile, nowIso } from "../lib/db";
 import { plainText } from "../lib/text";
@@ -290,13 +292,20 @@ async function verifyRewrites(
     let action: ClaimCheck["action"] = "kept";
     if (unsupported.length) {
       const entry = entries.find((e) => e.id === it.entryId);
-      const n = Number(it.change.evidenceIds.map((id) => id.match(/\.b(\d+)$/)?.[1]).find(Boolean));
-      const original = Number.isInteger(n) ? masterBulletsOf(it.entryId)[n - 1] : undefined;
       const index = entry?.bullets.findIndex((b) => plain(b) === it.change.tailored) ?? -1;
-      if (entry && original && index >= 0) {
-        entry.bullets[index] = original;
+      if (entry && index >= 0) {
+        // Back to the master bullet the rewrite was based on, unless the CV already has it (then just drop the
+        // rewrite, so the same bullet never appears twice).
+        const present = new Set(entry.bullets.map((b) => plain(b)));
+        const original = masterBulletsOf(it.entryId).find((m) => it.change.original.includes(plain(m)) && !present.has(plain(m)));
         it.change.proposed = it.change.tailored;
-        it.change.tailored = plain(original);
+        if (original) {
+          entry.bullets[index] = original;
+          it.change.tailored = plain(original);
+        } else {
+          entry.bullets.splice(index, 1);
+          it.change.tailored = "";
+        }
         it.change.status = "reverted";
         action = "reverted";
       }
@@ -341,6 +350,16 @@ async function draftLatexCv(env: Env, ctx: Context, insights: JobInsights, feedb
   }
 
   const verified = await verifyRewrites(env, ctx, entries, changesByEntry, (id) => located.get(id)?.x.bullets ?? []);
+  // Safety net: a bullet never appears twice in one entry, whatever path put it there.
+  for (const entry of entries) {
+    const seen = new Set<string>();
+    entry.bullets = entry.bullets.filter((b) => {
+      const key = plain(b).toLowerCase().replace(/\s+/g, " ").trim();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
   const header = headerFor(ctx);
   const doc = withHeaderItems(applyTailoring(master, { entries, skills: data.skills, omit: data.omit.map((o) => o.id) }, job.skills), header.items);
   const kept = new Set(doc.sections.flatMap((s) => (s.type === "entries" ? s.entries.map((e) => e.id) : s.type === "items" ? s.items.map((i) => i.id) : [])));
@@ -524,13 +543,17 @@ function lintRank(l: LintResult): number {
 }
 
 /** Writes (or revises) until the lint passes or the attempts run out. Returns the draft with the fewest violations. */
-async function untilClean(write: (feedback: string) => Promise<{ content: string; generator: string; claims: LetterDraft["claims"] }>, lint: (content: string) => LintResult, attempts: number) {
+async function untilClean(
+  write: (feedback: string) => Promise<{ content: string; generator: string; claims: LetterDraft["claims"] }>,
+  lint: (content: string) => Promise<LintResult>,
+  attempts: number,
+) {
   let best: LetterDraft | null = null;
   let feedback = "";
   let tries = 0;
   for (; tries < attempts; tries++) {
     const written = await write(feedback);
-    const result = lint(written.content);
+    const result = await lint(written.content);
     const draft = { ...written, lint: result };
     if (!best || lintRank(result) < lintRank(best.lint)) best = draft;
     if (result.ok) break;
@@ -564,7 +587,22 @@ export async function generateCoverLetter(env: Env, jobId: number, angle = ""): 
   });
   const input: LetterInput = { profile, knowledge: k, job, insights, cvText, angle: trimmedAngle, compact: compactPrompts(env), locationGuidance: guidance, voice: voiceBlock() };
   const lintCtx: LintContext = { company: job.company, status: job.eligibilityStatus, sgWorkAuthorization: profile.sgWorkAuthorization, ...specificityTerms(ctx, insights) };
-  const lint = (content: string) => lintLetter(content, lintCtx);
+  // Mechanical rules, then a fact-check (fast model): claims the evidence or posting don't support must be fixed
+  // like any other rule. If the fact-check fails to run, the mechanical result stands.
+  const lint = async (content: string): Promise<LintResult> => {
+    const text = normalizeHyphens(content);
+    const result = lintLetter(text, lintCtx);
+    try {
+      const { data } = await generateJson(env, { ...letterVerifyPrompt({ knowledge: k, insights, job, letter: text }), schema: LetterVerifySchema, tier: "fast" });
+      const found = data.unsupported
+        .filter((u) => u.quote.trim() && quoteAppears(u.quote, text))
+        .map((u) => ({ rule: "unsupported_claim", message: `Not supported by your experience or the posting: ${u.problem.trim()} Cut it or replace it with something the sources say.`, quote: u.quote.trim() }));
+      if (found.length) return { ...result, ok: false, violations: [...result.violations, ...found] };
+    } catch (err) {
+      console.warn(JSON.stringify({ message: "letter.verify_failed", error: String(err) }));
+    }
+    return result;
+  };
 
   const factIds = new Set(["posting", ...insights.companyFacts.map((f) => f.id)]);
   const requirementIds = new Set(insights.requirements.map((r) => r.id));
@@ -596,7 +634,7 @@ export async function generateCoverLetter(env: Env, jobId: number, angle = ""): 
   const written = await untilClean(
     async (feedback) => {
       const r = await generateJson(env, { ...coverLetterWritePrompt({ ...input, plan, lintFeedback: feedback }), schema: LetterSchema, temperature: 0.7 });
-      return { content: r.data.letter_markdown.trim(), generator: r.generator, claims: r.data.claims };
+      return { content: normalizeHyphens(r.data.letter_markdown.trim()), generator: r.generator, claims: r.data.claims };
     },
     lint,
     LETTER_RULES.maxLintAttempts,
@@ -618,7 +656,7 @@ export async function generateCoverLetter(env: Env, jobId: number, angle = ""): 
             schema: LetterSchema,
             temperature: 0.6,
           });
-          return { content: r.data.letter_markdown.trim(), generator: r.generator, claims: r.data.claims };
+          return { content: normalizeHyphens(r.data.letter_markdown.trim()), generator: r.generator, claims: r.data.claims };
         },
         lint,
         Math.max(1, LETTER_RULES.maxLintAttempts - 1),

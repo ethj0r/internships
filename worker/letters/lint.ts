@@ -154,12 +154,17 @@ const AUTH_CLAIM = /\b(employment pass|work pass|training employment pass|TEP|wo
 const LOCATION_SENTENCE = /\b(indonesia|bandung|jakarta|time ?zones?|utc|gmt|wib|async(?:hronous(?:ly)?)?|relocat\w*|on-?site|hybrid|in person|singapore office)\b/i;
 const OPENER = /^(?:i am|i'm|i am writing|i'm writing|my name is|as an? (?:passionate|motivated|dedicated|enthusiastic|aspiring)|i would like to|i wish to|please accept|allow me)\b/i;
 
+/** Unicode hyphens and dashes some models emit (U+2010, U+2011, U+2012, U+2212) read as "-", so "production‑grade" can't slip past the list. */
+export function normalizeHyphens(text: string): string {
+  return text.replace(/[\u2010\u2011\u2012\u2212]/g, "-");
+}
+
 export function lintLetter(letter: string, ctx: LintContext): LintResult {
   const rules = ctx.rules ?? LETTER_RULES;
   const banned = ctx.banned ?? BANNED;
   const violations: Violation[] = [];
   const warnings: Violation[] = [];
-  const paragraphs = bodyParagraphs(letter);
+  const paragraphs = bodyParagraphs(normalizeHyphens(letter));
   const body = paragraphs.join("\n\n");
   const words = countWords(body);
 
@@ -220,11 +225,15 @@ export function lintLetter(letter: string, ctx: LintContext): LintResult {
 }
 
 /** Feedback for the next attempt, one line per violation. */
-export function lintFeedback(result: LintResult): string {
+export function lintFeedback(result: LintResult, rules: LetterRules = LETTER_RULES): string {
   if (result.ok) return "";
-  return `\n\n<rule_violations>\nA program rejected the previous draft for these reasons. The next draft must fix every one:\n${result.violations
-    .map((v) => `- ${v.message}${v.quote ? ` (“${v.quote}”)` : ""}`)
-    .join("\n")}\n</rule_violations>`;
+  const lines = result.violations.map((v) => `- ${v.message}${v.quote ? ` (“${v.quote}”)` : ""}`);
+  // "Write more" rarely works; a concrete amount and place does.
+  if (result.words < rules.minWords) {
+    const missing = Math.round((rules.minWords + rules.maxWords) / 2) - result.words;
+    lines.push(`- To fix the length: add about ${missing} words by giving each body paragraph one more sentence with a concrete detail from the knowledge base (a decision you made, the hard part, a number) or from the posting. Don't add filler.`);
+  }
+  return `\n\n<rule_violations>\nA program rejected the previous draft for these reasons. The next draft must fix every one:\n${lines.join("\n")}\n</rule_violations>`;
 }
 
 /** The status-dependent instruction for the letter's one location sentence. */

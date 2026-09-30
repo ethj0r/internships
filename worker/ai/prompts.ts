@@ -126,6 +126,10 @@ export const LetterSchema = z.object({
   claims: z.array(z.object({ claim: z.string(), evidence_ids: z.array(z.string()), company_fact_ids: z.array(z.string()) })),
 });
 
+export const LetterVerifySchema = z.object({
+  unsupported: z.array(z.object({ quote: z.string(), problem: z.string() })),
+});
+
 export const LetterCritiqueSchema = z.object({
   flags: z.array(z.object({ quote: z.string(), problem: z.string(), fix: z.string() })),
   strongest_line: z.string(),
@@ -479,7 +483,17 @@ export function coverLetterWritePrompt(input: LetterInput & { plan: LetterPlan; 
     lint_feedback: input.lintFeedback,
     name: candidateName(profile, knowledge) || "the candidate's name",
     company: input.job.company,
+    targetWords: Math.round((LETTER_RULES.minWords + LETTER_RULES.maxWords) / 2),
     location_guidance: input.locationGuidance,
+  });
+}
+
+/** Fact-check of a letter draft against the relevant evidence and the posting (fast model). */
+export function letterVerifyPrompt(input: { knowledge: Knowledge; insights: JobInsights; job: JobDetail; letter: string }): Rendered {
+  return render("letter_verify", {
+    evidence: relevantKnowledgeBlock(input.knowledge, input.insights),
+    posting: truncate(input.job.description, 6_000),
+    letter: input.letter,
   });
 }
 

@@ -25,6 +25,12 @@ within 5 minutes (Workers AI) or 8 minutes (other APIs) fails over instead of ha
 `reasoning_effort: "low"` on Workers AI: at the default "medium", the CV plan ran past 5 minutes.
 
 Each Workers AI call logs its neuron cost (`ai.neurons`), so you can see what a job costs against the free allowance.
+Measured on 2026-09-30: about 3,000–3,500 neurons for one job (role analysis, CV and cover letter), so the free 10,000
+a day covers about three jobs.
+
+The account runs on the **Workers Free plan** (a deliberate choice, 2026-09-30). Some Workers AI models, including
+`@cf/zai-org/glm-5.3-flash`, are only available on the Paid plan, so they aren't in the menu. With gpt-oss-120b the CV
+is good but cover letters usually need a manual edit: the lint, fact-check and recruiter pass flag what to fix.
 
 ### What testing on 2026-09-28 changed
 

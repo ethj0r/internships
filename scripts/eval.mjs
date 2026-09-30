@@ -2,7 +2,7 @@
 // Runs the evaluation set (eval/postings.json) against a running dev server and saves every output for review.
 //
 //   npm run dev                      # in another terminal (local D1, remote Workers AI / NIM)
-//   node scripts/eval.mjs <label> [--docs] [--only 2,45]
+//   node scripts/eval.mjs <label> [--docs] [--only 2,45] [--model workers-gpt-oss]
 //
 // Without --docs it only records eligibility and priority (no writing-model calls). Outputs go to eval/runs/<label>/,
 // which is git-ignored because it contains your CV.
@@ -22,6 +22,8 @@ const label = args.find((a) => !a.startsWith("--")) ?? new Date().toISOString().
 const withDocs = args.includes("--docs");
 const onlyArg = args[args.indexOf("--only") + 1];
 const only = args.includes("--only") && onlyArg ? new Set(onlyArg.split(",").map(Number)) : null;
+// A model option id from config/models.json (GET /api/models); the server default when omitted.
+const model = args.includes("--model") ? args[args.indexOf("--model") + 1] : undefined;
 
 async function password() {
   if (process.env.APP_PASSWORD) return process.env.APP_PASSWORD;
@@ -74,11 +76,11 @@ for (const posting of set.postings) {
   };
   if (withDocs && posting.generate) {
     try {
-      const cv = await timed(() => api("POST", "/documents/tailor", { jobId: posting.jobId }));
+      const cv = await timed(() => api("POST", "/documents/tailor", { jobId: posting.jobId, model }));
       const cvDoc = await api("GET", `/documents/${cv.value.id}`);
       await writeFile(join(out, `${posting.jobId}-cv.tex`), cvDoc.content);
       await writeFile(join(out, `${posting.jobId}-cv.meta.json`), JSON.stringify(cvDoc.meta, null, 2));
-      const letter = await timed(() => api("POST", "/documents/cover-letter", { jobId: posting.jobId }));
+      const letter = await timed(() => api("POST", "/documents/cover-letter", { jobId: posting.jobId, model }));
       const letterDoc = await api("GET", `/documents/${letter.value.id}`);
       await writeFile(join(out, `${posting.jobId}-letter.md`), letterDoc.content);
       await writeFile(join(out, `${posting.jobId}-letter.meta.json`), JSON.stringify(letterDoc.meta, null, 2));

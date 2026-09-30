@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bodyParagraphs, countWords, lintLetter, locationGuidance, parseBanned, type LintContext } from "../worker/letters/lint";
+import { bodyParagraphs, countWords, lintFeedback, lintLetter, locationGuidance, normalizeHyphens, parseBanned, type LintContext } from "../worker/letters/lint";
 
 const ctx: LintContext = {
   company: "Stripe",
@@ -104,5 +104,31 @@ describe("self-assessment phrases from the evaluation", () => {
     expect(hits("These experiences prove I can learn new systems quickly.")).not.toHaveLength(0);
     expect(hits("mirroring the review loops at Stripe.")).not.toHaveLength(0);
     expect(hits("so shipping small changes behind review is normal for me.")).toHaveLength(0);
+  });
+});
+
+describe("length feedback", () => {
+  it("tells the writer how much to add and where", () => {
+    const short = lintLetter(good, { ...ctx, rules: { ...ctx.rules!, minWords: 200, maxWords: 280 } });
+    expect(short.ok).toBe(false);
+    const feedback = lintFeedback(short, { ...ctx.rules!, minWords: 200, maxWords: 280 });
+    expect(feedback).toMatch(/add about \d+ words/);
+    expect(feedback).toMatch(/one more sentence/);
+  });
+});
+
+describe("tells found in the 2026-09-30 evaluation", () => {
+  const hits = (text: string) =>
+    lintLetter(normalizeHyphens(good.replace("so shipping small changes behind review is normal for me.", text)), ctx).violations.filter((v) => v.rule === "banned_phrase");
+
+  it("catches banned words written with Unicode hyphens", () => {
+    expect(normalizeHyphens("production‑grade")).toBe("production-grade");
+    expect(hits("matching the need for production‑grade APIs.")).not.toHaveLength(0);
+  });
+
+  it("catches self-assessment clauses and borrowed expectations", () => {
+    expect(hits("so I evaluated K3s alone, demonstrating rapid learning of unfamiliar systems.")).not.toHaveLength(0);
+    expect(hits("matching Stripe’s demand for reliable APIs.")).not.toHaveLength(0);
+    expect(hits("mirroring Stripe’s expectations for code review.")).not.toHaveLength(0);
   });
 });
