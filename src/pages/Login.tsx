@@ -28,7 +28,7 @@ export function Login({ configured, onSignedIn }: { configured: boolean; onSigne
     <main className="login">
       <div className="login-inner">
         <AppMark className="login-mark" />
-        <h1 className="title-1">Internships</h1>
+        <h1 className="title-1">Sietch</h1>
         <p className="muted">
           {configured ? "Enter your password to continue." : "Sign-in isn't set up yet. Set the APP_PASSWORD and SESSION_SECRET secrets, then reload."}
         </p>

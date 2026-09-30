@@ -1,8 +1,10 @@
-# Internships
+# Sietch
 
 A personal internship search and application tracker. It finds new software internships across company career
 boards, ranks them against your skills and CV, tailors your CV and cover letter for the ones you choose, and keeps
 your whole pipeline, from first look to offer, in one place. You stay in control of every application.
+
+Named after the sietch in *Dune*, the hidden Fremen stronghold where everything needed for the long journey is kept in one place.
 
 Built on Cloudflare Workers and D1 with open-weight models (gpt-oss-120b on Workers AI by default, GLM-5.3-Flash on NVIDIA's free API from a per-document model menu), with a React interface that follows Apple's Human Interface Guidelines.
 
@@ -32,8 +34,8 @@ See [docs/architecture.md](docs/architecture.md) for the design decisions, schem
 Requirements: Node.js 22+, a Cloudflare account (for Workers AI during development; everything else runs locally).
 
 ```bash
-git clone https://github.com/ethj0r/internships.git
-cd internships
+git clone https://github.com/ethj0r/sietch.git
+cd sietch
 npm install
 
 cp .dev.vars.example .dev.vars    # then set APP_PASSWORD, SESSION_SECRET and, optionally, LLM_API_KEY

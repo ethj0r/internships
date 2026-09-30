@@ -108,6 +108,6 @@ export function useAction<A extends unknown[], R>(action: (...args: A) => Promis
 
 export function useDocumentTitle(title: string | undefined) {
   useEffect(() => {
-    document.title = title ? `${title} – Internships` : "Internships";
+    document.title = title ? `${title} – Sietch` : "Sietch";
   }, [title]);
 }
